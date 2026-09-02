@@ -13,36 +13,64 @@ import android.os.IBinder
 import android.os.PowerManager
 import java.io.File
 import java.io.FileWriter
-import java.net.InetSocketAddress
-import java.net.Socket
+import java.net.HttpURLConnection
+import java.net.ServerSocket
+import java.net.URL
+import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 class KimiService : Service() {
 
     companion object {
         private const val CHANNEL_ID = "kimi"
         private const val NOTIF_ID = 1
+
+        // 固定端口让 WebView 的 localStorage（同源按端口隔离）在重启后仍然有效；
+        // 被占用时才退到随机端口
+        private const val PREFERRED_PORT = 17234
+
+        // 连续崩溃这么多次后放弃自动重启，避免烧电死循环
+        private const val MAX_CRASHES = 5
     }
 
     private var process: Process? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var stopped = false
+    @Volatile private var engineThreadRunning = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundWithText("正在启动…")
         acquireWakeLock()
-        if (process == null) {
+        if (!engineThreadRunning) {
+            engineThreadRunning = true
             stopped = false
-            Thread { run() }.start()
+            Thread {
+                try {
+                    run()
+                } finally {
+                    engineThreadRunning = false
+                }
+            }.start()
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         stopped = true
-        process?.destroy()
+        val p = process
         process = null
+        if (p != null) {
+            p.destroy()
+            Thread {
+                try {
+                    if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroyForcibly()
+                } catch (_: Throwable) {
+                    try { p.destroyForcibly() } catch (_: Throwable) {}
+                }
+            }.start()
+        }
         wakeLock?.let { if (it.isHeld) it.release() }
         KimiState.running = false
         KimiState.url = null
@@ -91,7 +119,7 @@ class KimiService : Service() {
     private fun startKimiLoop() {
         var crashes = 0
         while (!stopped) {
-            val port = findFreePort()
+            val port = pickPort()
             KimiState.status = "正在启动 Kimi 引擎…"
             updateNotification("正在启动 Kimi 引擎…")
             val p = try {
@@ -99,18 +127,22 @@ class KimiService : Service() {
             } catch (t: Throwable) {
                 KimiState.lastError = t.message
                 crashes++
+                if (giveUpIfHopeless(crashes)) break
                 sleepBackoff(crashes)
                 continue
             }
             process = p
-            if (waitForServer(p, port, 45_000)) {
-                KimiState.url = "http://127.0.0.1:$port/"
+            val token = if (waitForServer(p, port, 45_000)) readServerToken(10_000) else null
+            if (token != null) {
+                // Web UI 从 URL fragment 读 token（#token=...），fragment 不会随请求发出
+                KimiState.url = "http://127.0.0.1:$port/#token=" + URLEncoder.encode(token, "UTF-8")
                 KimiState.status = "运行中"
                 KimiState.running = true
                 KimiState.lastError = null
                 updateNotification("Kimi 运行中，点我打开")
                 crashes = 0
             } else {
+                KimiState.lastError = "引擎未能正常就绪（无 server token）"
                 try { p.destroy() } catch (_: Throwable) {}
             }
             val code = try { p.waitFor() } catch (_: InterruptedException) { break }
@@ -119,10 +151,19 @@ class KimiService : Service() {
             KimiState.running = false
             if (stopped) break
             crashes++
+            if (giveUpIfHopeless(crashes)) break
             KimiState.status = "引擎退出(code=$code)，稍后重启…"
             updateNotification("Kimi 引擎已退出，准备重启")
             sleepBackoff(crashes)
         }
+    }
+
+    private fun giveUpIfHopeless(crashes: Int): Boolean {
+        if (crashes < MAX_CRASHES) return false
+        KimiState.status = "引擎连续崩溃 $crashes 次，已停止自动重启，请重新打开 App"
+        updateNotification("引擎反复崩溃，已停止。请重新打开 App")
+        stopSelf()
+        return true
     }
 
     private fun sleepBackoff(crashes: Int) {
@@ -132,6 +173,22 @@ class KimiService : Service() {
             Thread.sleep(500)
             left -= 500
         }
+    }
+
+    /** 引擎首启时自动生成并复用 files/home/.kimi-code/server.token（0600） */
+    private fun readServerToken(timeoutMs: Long): String? {
+        val f = File(filesDir, "home/.kimi-code/server.token")
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline && !stopped) {
+            try {
+                if (f.isFile) {
+                    val t = f.readText().trim()
+                    if (t.isNotEmpty()) return t
+                }
+            } catch (_: Throwable) {}
+            Thread.sleep(300)
+        }
+        return null
     }
 
     private fun startKimiProcess(port: Int): Process {
@@ -145,8 +202,7 @@ class KimiService : Service() {
             "${prefix.path}/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
             "web",
             "--port", port.toString(),
-            // 只绑 loopback + 随机端口，本机之外不可达；WebView 同机直连
-            "--dangerous-bypass-auth",
+            // 只绑 loopback；REST/WS 走内置 bearer token（server.token），同机其他 App 无法冒用
             "--no-open",
             "--web-title", "口袋Kimi"
         )
@@ -180,24 +236,38 @@ class KimiService : Service() {
         return p
     }
 
+    /** 不能只验 TCP connect——端口可能被别的进程占用；要求 HTTP 指纹确认是本引擎 */
     private fun waitForServer(p: Process, port: Int, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (!p.isAlive) return false
-            try {
-                Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 500) }
-                return true
-            } catch (_: Throwable) {
-                Thread.sleep(300)
-            }
+            if (probeHealthz(port)) return true
+            Thread.sleep(300)
         }
         return false
     }
 
-    private fun findFreePort(): Int = try {
-        java.net.ServerSocket(0).use { it.localPort }
-    } catch (_: Throwable) {
-        58627
+    private fun probeHealthz(port: Int): Boolean {
+        return try {
+            val conn = URL("http://127.0.0.1:$port/api/v1/healthz")
+                .openConnection() as HttpURLConnection
+            conn.connectTimeout = 500
+            conn.readTimeout = 500
+            conn.inputStream.bufferedReader().use { it.readText() }.contains("\"ok\"")
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun pickPort(): Int {
+        try {
+            ServerSocket(PREFERRED_PORT).use { return PREFERRED_PORT }
+        } catch (_: Throwable) {}
+        return try {
+            ServerSocket(0).use { it.localPort }
+        } catch (_: Throwable) {
+            58627
+        }
     }
 
     private fun buildNotification(text: String): Notification {
