@@ -1,0 +1,25 @@
+# 大体积构建产物（不进 git；runtime.pkg 可从 GitHub Releases 下载或本地重新生成）
+*.tar.gz
+*.tgz
+*.zip
+*.pkg
+dist/
+runtime/Packages
+runtime/extract.log
+runtime/staging/
+runtime/staging-phone/
+runtime/staging-final/
+runtime/phone-runtime.tar.gz
+moonshot-ai-kimi-code-*.tgz
+
+# Android 构建
+android/.gradle/
+android/**/build/
+android/local.properties
+
+# 签名（私钥绝密，不进库）
+*.keystore
+signing.properties
+
+# 系统垃圾
+.DS_Store
