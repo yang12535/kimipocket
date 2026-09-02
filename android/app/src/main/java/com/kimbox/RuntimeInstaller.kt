@@ -48,16 +48,46 @@ object RuntimeInstaller {
     fun ensureHome(ctx: Context) {
         val home = File(ctx.filesDir, "home")
         val ready = File(home, ".home_ready")
-        if (ready.exists()) return
+        if (ready.exists()) {
+            ensureAgentsMd(ctx)
+            return
+        }
         // 兼容旧版安装：已有配置说明初始化过，只补 marker，绝不重解压覆盖登录态
         if (File(home, ".kimi-code/config.toml").exists()) {
             home.mkdirs()
             ready.writeText("1\n")
+            ensureAgentsMd(ctx)
             return
         }
         KimiState.status = "正在写入初始配置…"
         extractTarGz(ctx, "kimihome.pkg", home)
         ready.writeText("1\n")
+    }
+
+    /** 老装机补偿：记忆模块的注入提示词缺失时单独补种（不整包重解压，不覆盖已存在的文件） */
+    @Synchronized
+    fun ensureAgentsMd(ctx: Context) {
+        val target = File(ctx.filesDir, "home/.kimi-code/AGENTS.md")
+        if (target.exists()) return
+        val data = readAssetEntry(ctx, "kimihome.pkg", ".kimi-code/AGENTS.md") ?: return
+        target.parentFile?.mkdirs()
+        target.writeBytes(data)
+        android.util.Log.i("kimbox", "seeded home/.kimi-code/AGENTS.md (memory module)")
+    }
+
+    private fun readAssetEntry(ctx: Context, asset: String, wantName: String): ByteArray? {
+        ctx.assets.open(asset).use { raw ->
+            TarArchiveInputStream(GZIPInputStream(BufferedInputStream(raw, 64 * 1024))).use { tar ->
+                var entry = tar.nextTarEntry
+                while (entry != null) {
+                    if (entry.isFile && entry.name.removePrefix("./") == wantName) {
+                        return tar.readBytes()
+                    }
+                    entry = tar.nextTarEntry
+                }
+            }
+        }
+        return null
     }
 
     private fun extractTarGz(ctx: Context, asset: String, dest: File) {

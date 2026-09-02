@@ -15,8 +15,8 @@ android {
         // targetSdk 压到 28：规避高版本 Android 对应用私有目录 exec 的限制
         // （与 Termux 同款策略；本应用只走侧载，不受 Play 的 targetSdk 要求约束）
         targetSdk = 28
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
     }
 
     aaptOptions {
