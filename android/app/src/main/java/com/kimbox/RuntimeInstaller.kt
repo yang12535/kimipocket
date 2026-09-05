@@ -19,7 +19,7 @@ import java.util.zip.GZIPInputStream
 object RuntimeInstaller {
 
     // 每次 runtime.pkg 内容变化时 +1，触发已装机型的重解压（不动 home/，不影响登录态）
-    private const val RUNTIME_VERSION = 6
+    private const val RUNTIME_VERSION = 7
 
     // home/ 种子文件版本号：当种子内容变化时 +1，触发已装机型的覆盖更新（仅限用户未修改的文件）。
     // 通过比对设备文件哈希与上次种子哈希判断用户是否改过：
