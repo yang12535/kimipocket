@@ -250,7 +250,12 @@ class KimiService : Service() {
         return try {
             KimiState.status = "检测到运行时损坏，正在自动修复（重装引擎，不影响登录）…"
             updateNotification("运行时损坏，正在自动修复…")
-            deleteRecursivelyNoFollow(File(filesDir, "usr"))
+            // 清理不彻底就不能往下走：.rt_version 若幸存，ensureInstalled 会直接
+            // 跳过安装，自愈形同虚设。返回失败让崩溃计数兜底，下次启动再试
+            if (!deleteRecursivelyNoFollow(File(filesDir, "usr"))) {
+                KimiState.lastError = "自动修复中止：旧文件清理不完整，请重新打开 App 重试"
+                return false
+            }
             RuntimeInstaller.ensureInstalled(applicationContext)
             RuntimeInstaller.ensureHome(applicationContext)
             true

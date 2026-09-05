@@ -38,7 +38,11 @@ object RuntimeInstaller {
             // 符号链接上抛异常（每次启动同一位置炸死），也会和 agent 自升级的 npm 树
             // 混出「缝合怪」引擎（新版残留文件 + 打包旧文件）
             KimiState.status = "运行环境升级：正在清理旧环境…"
-            deleteRecursivelyNoFollow(usr)
+            // 清不干净就别往上盖：残留 + 新解压 = 缝合怪引擎。marker 还是旧版本号，
+            // 下次启动会重走升级路径重试
+            if (!deleteRecursivelyNoFollow(usr)) {
+                throw IOException("旧环境清理不完整（可能有文件被占用），已中止升级；请重新打开 App 重试")
+            }
         }
 
         val free = StatFs(ctx.filesDir.absolutePath).availableBytes
@@ -54,7 +58,9 @@ object RuntimeInstaller {
         } catch (t: Throwable) {
             // 解一半的树宁可整个删掉：下次启动从干净状态重来，
             // 避免同一个坏条目在每次启动时重复炸死（只能清数据的死局）
-            deleteRecursivelyNoFollow(usr)
+            if (!deleteRecursivelyNoFollow(usr)) {
+                throw IOException("部署失败且残留清理不完整，请重新打开 App 重试", t)
+            }
             throw t
         }
     }
