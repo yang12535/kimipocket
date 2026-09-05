@@ -19,7 +19,7 @@ import java.util.zip.GZIPInputStream
 object RuntimeInstaller {
 
     // 每次 runtime.pkg 内容变化时 +1，触发已装机型的重解压（不动 home/，不影响登录态）
-    private const val RUNTIME_VERSION = 1
+    private const val RUNTIME_VERSION = 3
 
     // 解压后约 350MB（usr/ ~233MB + 缓存增长余量），低于这个值宁可报错也别解一半
     private const val MIN_FREE_BYTES = 700L * 1024 * 1024
@@ -64,15 +64,21 @@ object RuntimeInstaller {
         ready.writeText("1\n")
     }
 
-    /** 老装机补偿：记忆模块的注入提示词缺失时单独补种（不整包重解压，不覆盖已存在的文件） */
+    /** 老装机补偿：记忆模块的注入文件缺失时单独补种（不整包重解压，不覆盖已存在的文件） */
     @Synchronized
     fun ensureAgentsMd(ctx: Context) {
-        val target = File(ctx.filesDir, "home/.kimi-code/AGENTS.md")
-        if (target.exists()) return
-        val data = readAssetEntry(ctx, "kimihome.pkg", ".kimi-code/AGENTS.md") ?: return
-        target.parentFile?.mkdirs()
-        target.writeBytes(data)
-        android.util.Log.i("kimbox", "seeded home/.kimi-code/AGENTS.md (memory module)")
+        val seeds = listOf(
+            ".kimi-code/AGENTS.md",
+            ".kimi-code/skills/kimipocket-update/SKILL.md",
+        )
+        for (name in seeds) {
+            val target = File(ctx.filesDir, "home/$name")
+            if (target.exists()) continue
+            val data = readAssetEntry(ctx, "kimihome.pkg", name) ?: continue
+            target.parentFile?.mkdirs()
+            target.writeBytes(data)
+            android.util.Log.i("kimbox", "seeded home/$name")
+        }
     }
 
     private fun readAssetEntry(ctx: Context, asset: String, wantName: String): ByteArray? {

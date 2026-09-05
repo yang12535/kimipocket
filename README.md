@@ -22,9 +22,12 @@ WebView 通过 `127.0.0.1` 访问内置的 `kimi web` 服务。
 APK
 ├── assets/runtime.pkg       # gzip tar：从真实跑通的 Termux 环境抽取的最小运行时
 │                            #   (node + npm + bash/coreutils/git + kimi-code 0.40.1)
-├── assets/kimihome.pkg      # 初始 ~/.kimi-code（仅 config.toml + region，无凭据）
+│                            #   + apt/dpkg 包管理器（清华源，81 个包）
+├── assets/kimihome.pkg      # 初始 ~/.kimi-code（config.toml + region + 记忆模块提示词
+│                            #   AGENTS.md + kimipocket-update skill，无凭据）
 └── Kotlin App (无 androidx)
     ├── KimiService          # 前台服务：解压 runtime → 起 kimi web(127.0.0.1:17234)
+    │                        #   + 变砖自愈（检测到运行时被破坏自动重解压，不动登录态）
     ├── RuntimeInstaller     # .pkg 解压器（符号链接/可执行位保留，路径逃逸防护）
     ├── MainActivity         # WebView 壳 + 首次部署进度 + 文件选择器
     └── BootReceiver         # 开机自启（尽力而为）
@@ -39,6 +42,16 @@ APK
   （`runtime/patch_runtime.py`），无需重新编译任何 Termux 包。
 - **termux-exec**：启动引擎时必须 `LD_PRELOAD=$PREFIX/lib/libtermux-exec.so`，
   否则 `#!/usr/bin/env node` 之类的 shebang 在 Android 上无法执行。
+- **包管理器**：内置 apt/dpkg（清华镜像源），App 内可 `pkg install <包>` 装软件。
+  deb 内的路径硬编码 `com.termux`，由 `DPkg::Pre-Install-Pkgs` 钩子
+  （`usr/libexec/kimbox-deb-rewrite`）在 dpkg 解包前等长重写为 `com.kimbox`——
+  apt 下载时已按签名索引校验 deb 哈希，重写发生在校验之后，不破坏安全模型。
+  首次 `pkg upgrade` 会刷新全部 81 个包（打包时点与源有几天版本差），属正常现象。
+- **变砖自愈**：agent 有能力改坏自家运行时（比如手工下载 Termux bootstrap 覆盖
+  系统库——真实发生过，见 issue #1）。引擎崩溃时 KimiService 读日志尾巴，
+  命中链接器/模块加载错误特征（`CANNOT LINK EXECUTABLE` 等）则自动删除
+  `usr/` 重解压，`home/` 登录态不动；每次服务运行只自愈一次，防死循环。
+  已经过破坏性测试（删掉 libcrypto.so.3 后约 10 秒自动恢复）。
 - **targetSdk 28**：规避 Android 10+ 对应用私有目录 exec 的限制（与 Termux 同策略；
   纯侧载分发，不受 Play targetSdk 要求约束）。
 - **登录**：不烘凭据。kimi web 未登录时内置设备码页面（去登录/复制链接/设备码），
@@ -75,8 +88,9 @@ APK
 cd runtime
 #   1) ssh 到手机执行 extract-phone-runtime.sh > phone-runtime.tar.gz
 #   2) python3 patch_runtime.py        # 解包 → 补丁 com.termux→com.kimbox → staging-final/usr
-#   3) tar --numeric-owner --owner=0 --group=0 -czf runtime.pkg -C staging-final usr
-#   4) 制作 kimihome.pkg（tar czf，内容是一个 .kimi-code/ 目录：
+#   3) ./add-pkg-manager.sh            # 从清华源抽 apt/dpkg/keyring 等 21 个包合并进 staging-final
+#   4) tar --numeric-owner --owner=0 --group=0 -czf runtime.pkg -C staging-final usr
+#   5) 制作 kimihome.pkg（tar czf，内容是一个 .kimi-code/ 目录：
 #      config.toml 选默认模型、region 标记；不要放任何 token/凭据）
 cp runtime.pkg kimihome.pkg ../android/app/src/main/assets/
 ```
@@ -112,8 +126,9 @@ EOF
   初始配置只在缺失时写入，升级永不覆盖已登录状态。
 - **运行时升级**：APK 内 `runtime.pkg` 变化时（`RUNTIME_VERSION` +1），下次启动
   只重解压 `usr/` 目录，不动 `home/`。
-- **引擎自升级**：环境里有完整 npm，理论上 agent 可以执行
-  `npm i -g @moonshot-ai/kimi-code` 原地升级自身——这也是保留 `home/` 的另一个原因。
+- **引擎自升级**：环境里有完整 npm + apt，理论上 agent 可以执行
+  `npm i -g @moonshot-ai/kimi-code` 原地升级自身，`pkg install` 补系统依赖
+  ——这也是保留 `home/` 的另一个原因。
 
 ## 已知坑 / TODO
 
@@ -123,4 +138,5 @@ EOF
   `adb shell settings put global settings_enable_monitor_phantom_procs false`
 - 国产 ROM 杀后台：需把 App 加入电池优化白名单/自启动白名单
 - node-pty 未打包（npm 可选依赖），Web 终端功能暂缺
-- 引擎连续崩溃 5 次后停止自动重启（防烧电死循环），重新打开 App 即可再试
+- 引擎连续崩溃 5 次后停止自动重启（防烧电死循环），重新打开 App 即可再试；
+  若是运行时损坏（链接器/模块错误），会触发自愈自动重解压，见上文「变砖自愈」

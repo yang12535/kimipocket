@@ -81,3 +81,10 @@
 本地单机，无远端。配置 GitHub 私有仓库同步后，在此追加：
 推送前先 `git pull --rebase`；多 agent 共用远端，别强推、别改历史。
 ```
+
+---
+
+## 项目与更新
+
+本 App 是开源项目「口袋Kimi」（https://github.com/yang12535/kimipocket）。
+涉及项目地址、版本更新、引擎/系统包/APK 三层升级方式时，使用 `kimipocket-update` skill。

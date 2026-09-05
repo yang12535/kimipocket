@@ -151,6 +151,13 @@ class KimiService : Service() {
             KimiState.running = false
             if (stopped) break
             crashes++
+            // 把引擎日志尾巴亮出来，别让小白用户只看到"退出码=1"干瞪眼
+            val logTail = tailOfLog()
+            if (logTail != null) KimiState.lastError = logTail
+            if (looksLikeBrokenRuntime(logTail) && trySelfHeal()) {
+                crashes = 0
+                continue
+            }
             if (giveUpIfHopeless(crashes)) break
             KimiState.status = "引擎退出(code=$code)，稍后重启…"
             updateNotification("Kimi 引擎已退出，准备重启")
@@ -158,9 +165,48 @@ class KimiService : Service() {
         }
     }
 
+    private fun tailOfLog(): String? {
+        return try {
+            val f = File(filesDir, "logs/kimi.log")
+            if (!f.isFile) return null
+            val bytes = f.readBytes()
+            val off = if (bytes.size > 2048) bytes.size - 2048 else 0
+            String(bytes, off, bytes.size - off)
+                .lines().map { it.trim() }.filter { it.isNotEmpty() }
+                .takeLast(3).joinToString("\n").take(500).ifBlank { null }
+        } catch (_: Throwable) { null }
+    }
+
+    /** agent 有能力改坏自家运行时（如手工覆盖系统库），这类错误重试无用，只能重建 */
+    private fun looksLikeBrokenRuntime(logTail: String?): Boolean {
+        if (logTail == null) return false
+        return logTail.contains("CANNOT LINK EXECUTABLE") ||
+            logTail.contains("cannot locate symbol") ||
+            logTail.contains("Cannot find module") ||
+            logTail.contains("MODULE_NOT_FOUND")
+    }
+
+    /** 变砖自愈：清掉被污染的 usr/ 重解压（home/ 登录态不动）。每次服务运行只自愈一次，防死循环 */
+    private var selfHealed = false
+    private fun trySelfHeal(): Boolean {
+        if (selfHealed) return false
+        selfHealed = true
+        return try {
+            KimiState.status = "检测到运行时损坏，正在自动修复（重装引擎，不影响登录）…"
+            updateNotification("运行时损坏，正在自动修复…")
+            File(filesDir, "usr").deleteRecursively()
+            RuntimeInstaller.ensureInstalled(applicationContext)
+            RuntimeInstaller.ensureHome(applicationContext)
+            true
+        } catch (t: Throwable) {
+            KimiState.lastError = "自动修复失败：${t.message}"
+            false
+        }
+    }
+
     private fun giveUpIfHopeless(crashes: Int): Boolean {
         if (crashes < MAX_CRASHES) return false
-        KimiState.status = "引擎连续崩溃 $crashes 次，已停止自动重启，请重新打开 App"
+        KimiState.status = "引擎连续崩溃 $crashes 次，已停止自动重启。请重新打开 App；仍不行则在系统设置里清除本应用数据（会退出登录）后重试"
         updateNotification("引擎反复崩溃，已停止。请重新打开 App")
         stopSelf()
         return true
