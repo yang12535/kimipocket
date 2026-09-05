@@ -53,26 +53,35 @@ pkg upgrade         # 升级所有包
 
 ### 3. APK / 运行时——agent 只能下载和引导，安装必须用户亲手点
 
-agent 没有安装 APK 的权限，流程是：
+agent 没有安装 APK 的权限，也不能往公共目录写文件（应用无存储权限，curl 下载
+到 `/sdcard/Download` 在 Android 10+ 会 EACCES）。正确做法是**调系统浏览器**
+让它自己去下载——浏览器有自己的存储权限：
 
 ```bash
-cd /sdcard/Download
-# 第一步：从 GitHub API 查最新版 APK 的真实下载地址（资产名带版本号，没有固定链接）
-url=$(curl -s https://api.github.com/repos/yang12535/kimipocket/releases/latest \
-  | grep -o '"browser_download_url": *"[^"]*\.apk"' | head -1 | cut -d'"' -f4)
-# 第二步：校验拿到了地址——为空说明 API 结构变了或没命中 .apk，
-# 别硬下载，让用户去 https://github.com/yang12535/kimipocket/releases 手动下
-if [ -z "$url" ]; then echo "没查到 APK 下载地址，请打开 releases 页面手动下载"; exit 1; fi
-# 第三步：下载
-curl -L -o kimipocket-latest.apk "$url"
-# 第四步：核对大小——正常应大于 80MB；只有几十 KB 就是下到了 404 页面，
-# 回第一步重新核对文件名/地址
-ls -l kimipocket-latest.apk
+# 优先：直接让浏览器打开 releases 页面，用户自己点 APK 下载
+am start -a android.intent.action.VIEW \
+  -d "https://github.com/yang12535/kimipocket/releases"
 ```
 
-然后告诉用户：打开任意文件管理器 → Download/下载目录 → 点这个 APK 安装
-（签名一致可直接覆盖，登录态和文件都在）→ 装完打开 App：若新版含运行时更新，
-首次打开会自动重装运行环境（约 20 秒，界面有进度提示）；没有运行时更新则直接可用。
+如果 `am start` 报错（极少见，比如某些精简 ROM 砍了 Activity Manager CLI），
+回退方案：告诉用户手动打开浏览器访问 https://github.com/yang12535/kimipocket/releases 。
+
+**禁止**用 `curl -o /sdcard/Download/...` 或任何写公共目录的命令，一定会失败。
+
+下载完后告诉用户：在浏览器下载记录或文件管理器里点这个 APK 安装（签名一致可直接
+覆盖，登录态和文件都在）→ 装完打开 App：若新版含运行时更新，首次打开会自动重装
+运行环境（约 20 秒，界面有进度提示）；没有运行时更新则直接可用。
+
+## 文件导出（把做好的文件交给用户）
+
+应用没有写公共目录的权限，**禁止** `cp / mv` 到 `/sdcard/Download` 等公共路径
+（EACCES）。正确流程：
+
+1. 把要导出的文件放到 `~/exports/`（即 `/data/data/com.kimbox/files/home/exports/`）。
+   如果目录不存在就 `mkdir -p ~/exports`。
+2. 告诉用户：点 App 右下角的 📤 按钮 → 选择文件 → 选保存位置。
+
+这个按钮走的是系统文件选择器（SAF），系统会处理权限和写入，不需要应用有存储权限。
 
 ## 出故障时的自救顺序
 

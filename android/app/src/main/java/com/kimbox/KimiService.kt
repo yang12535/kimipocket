@@ -140,8 +140,8 @@ class KimiService : Service() {
                 「帮我做一个记录每天开销的网页」
 
                 本目录位置：Android/data/com.kimbox/files/workspace
-                （安卓 11 起手机上的文件管理器可能进不去这个目录：连电脑可以看到，
-                 或者直接让 Kimi 把文件复制到 Download/下载 目录）
+                （安卓 11 起文件管理器可能进不去这个目录：连电脑可以看到；
+                 要导出文件到手机公共位置，点 App 右下角的 📤 导出按钮）
                 """.trimIndent() + "\n"
             )
         }
