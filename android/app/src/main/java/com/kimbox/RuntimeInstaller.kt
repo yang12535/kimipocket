@@ -33,12 +33,15 @@ object RuntimeInstaller {
         } catch (_: Exception) { null }
         if (installed == RUNTIME_VERSION) return
 
-        if (installed != null && usr.isDirectory) {
-            // 版本升级 = 清空后全新解压。覆盖式解压会在 目录↔文件 翻转、agent 留下的外部
-            // 符号链接上抛异常（每次启动同一位置炸死），也会和 agent 自升级的 npm 树
-            // 混出「缝合怪」引擎（新版残留文件 + 打包旧文件）
-            KimiState.status = "运行环境升级：正在清理旧环境…"
-            usr.deleteRecursively()
+        // 只要 usr/ 还在就得先清：版本升级（marker 在）或上次清理失败的半截树
+        // （marker 已删但残留幸存，installed == null 也不能放过）。覆盖式解压会在
+        // 目录↔文件 翻转、agent 留下的外部符号链接上抛异常，也会和残留混出缝合怪引擎
+        if (usr.isDirectory) {
+            KimiState.status = if (installed == null) "清理上次未完成的残留环境…" else "运行环境升级：正在清理旧环境…"
+            // 清不干净就别往上盖：残留 + 新解压 = 缝合怪引擎。中止后下次启动重走本路径重试
+            if (!deleteRecursivelyNoFollow(usr)) {
+                throw IOException("旧环境清理不完整（可能有文件被占用），已中止；请重新打开 App 重试")
+            }
         }
 
         val free = StatFs(ctx.filesDir.absolutePath).availableBytes
@@ -54,7 +57,9 @@ object RuntimeInstaller {
         } catch (t: Throwable) {
             // 解一半的树宁可整个删掉：下次启动从干净状态重来，
             // 避免同一个坏条目在每次启动时重复炸死（只能清数据的死局）
-            usr.deleteRecursively()
+            if (!deleteRecursivelyNoFollow(usr)) {
+                throw IOException("部署失败且残留清理不完整，请重新打开 App 重试", t)
+            }
             throw t
         }
     }
