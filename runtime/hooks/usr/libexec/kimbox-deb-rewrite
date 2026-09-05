@@ -1,0 +1,115 @@
+#!/data/data/com.kimbox/files/usr/bin/bash
+# dpkg/apt 钩子（DPkg::Pre-Install-Pkgs）：安装前把 .deb 里的 com.termux 重写成 com.kimbox。
+# 两个名字同为 10 字符，内容与 tar 路径都可等长替换——与本项目 patch_runtime.py 同一思路。
+# apt 在下载时已按签名索引校验过 deb 哈希，此处重写发生在校验之后，不影响安全性。
+#
+# 设计要点：
+# - 不用 set -e：单 deb 内单文件失败只记日志跳过该文件（由 node 汇总）；某 deb 任一
+#   环节失败则整体跳过该 deb（保留原 deb 不动，让 dpkg 后续响亮失败），绝不中止整个
+#   apt 事务。
+# - 每个 deb 只起一个 node 进程扫描+重写整棵树（文件列表以 NUL 分隔经 stdin 喂入），
+#   node 内先分块扫描 com.termux 字节串、命中才读全文件替换写回，未命中文件零写开销。
+# - 临时目录用 trap 兜底清理（CUR_TMP 全局登记，EXIT/INT/TERM 都触发）。
+# - 循环体内可能读 stdin 的命令（dpkg-deb 等）统一 </dev/null，防止吃掉 apt 喂进来
+#   的 deb 列表。
+set -u
+# KIMBOX_PREFIX 仅供 PC 侧测试覆盖，设备上走默认绝对前缀。
+P=${KIMBOX_PREFIX:-/data/data/com.kimbox/files/usr}
+export PATH="$P/bin" LD_LIBRARY_PATH="$P/lib" LD_PRELOAD="$P/lib/libtermux-exec.so" TMPDIR="$P/tmp"
+
+NODE_REWRITE="$P/libexec/kimbox-deb-rewrite.js"
+
+log() { echo "kimbox-deb-rewrite: $*" >&2; }
+
+CUR_TMP=
+cleanup() {
+    if [ -n "$CUR_TMP" ]; then
+        rm -rf "$CUR_TMP" 2>/dev/null
+        CUR_TMP=
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# node 不可用时无法重写：全部 deb 保持原样，交给 dpkg 响亮失败。
+if [ ! -x "$P/bin/node" ] || [ ! -f "$NODE_REWRITE" ]; then
+    log "node 或 $NODE_REWRITE 缺失，所有 deb 原样放行"
+    exit 0
+fi
+# 裸跑 apt 时 usr/tmp 可能还没建出来，兜底一下
+[ -d "$P/tmp" ] || mkdir -p "$P/tmp" 2>/dev/null
+
+while IFS= read -r deb; do
+    case "$deb" in *.deb) ;; *) continue ;; esac
+    [ -f "$deb" ] || continue
+
+    if ! CUR_TMP=$(mktemp -d "$P/tmp/debrew.XXXXXX"); then
+        log "mktemp 失败，跳过: $deb"
+        continue
+    fi
+    x="$CUR_TMP/x"
+
+    if ! dpkg-deb -R "$deb" "$x" </dev/null 2>"$CUR_TMP/extract.err"; then
+        log "解包失败，保留原 deb: $deb ($(head -c 200 "$CUR_TMP/extract.err"))"
+        cleanup
+        continue
+    fi
+
+    # 不含 com.termux 目录树的 deb 与本应用前缀无关，原样放行
+    if [ ! -d "$x/data/data/com.termux" ]; then
+        cleanup
+        continue
+    fi
+
+    if ! mv "$x/data/data/com.termux" "$x/data/data/com.kimbox"; then
+        log "目录改名失败，保留原 deb: $deb"
+        cleanup
+        continue
+    fi
+
+    # 符号链接目标重写；-print0 / read -d '' + IFS= 保住含空白/特殊字符的名字
+    find "$x" -type l -print0 | while IFS= read -r -d '' l; do
+        t=$(readlink "$l")
+        case "$t" in
+            *com.termux*)
+                ln -snf "${t//com.termux/com.kimbox}" "$l" \
+                    || log "符号链接重写失败（跳过）: $l"
+                ;;
+        esac
+    done
+
+    # 文件内容重写：单个 node 进程处理整棵树；任一文件失败 -> node 退出非零 -> 放弃该 deb
+    if ! find "$x" -type f -print0 > "$CUR_TMP/files.list"; then
+        log "枚举文件失败，保留原 deb: $deb"
+        cleanup
+        continue
+    fi
+    if ! "$P/bin/node" "$NODE_REWRITE" < "$CUR_TMP/files.list"; then
+        log "内容重写有文件失败，保留原 deb: $deb"
+        cleanup
+        continue
+    fi
+
+    # md5sums：目录已改名（条目路径全变）且被改写文件内容已变，逐条修补不可靠，
+    # 选择从整棵树重新生成（md5sum 输出格式即 dpkg 约定格式，DEBIAN/ 自身不入列）；
+    # 重算失败则直接删掉该文件——md5sums 在 deb 里是可选的，缺失不影响 dpkg 安装。
+    if [ -f "$x/DEBIAN/md5sums" ]; then
+        if ( cd "$x" && find . -path ./DEBIAN -prune -o -type f -print0 | LC_ALL=C sort -z | xargs -0 md5sum ) > "$CUR_TMP/md5sums" 2>/dev/null; then
+            cp "$CUR_TMP/md5sums" "$x/DEBIAN/md5sums"
+        else
+            log "md5sums 重算失败，改为删除: $deb"
+            rm -f "$x/DEBIAN/md5sums"
+        fi
+    fi
+
+    if dpkg-deb -b "$x" "$deb.new" </dev/null >/dev/null 2>&1; then
+        if ! mv -f "$deb.new" "$deb"; then
+            log "原子替换失败，原 deb 未动: $deb"
+            rm -f "$deb.new"
+        fi
+    else
+        rm -f "$deb.new"   # 清掉可能残留的半截 .new
+        log "重打包失败，保留原 deb: $deb"
+    fi
+    cleanup
+done
+exit 0
