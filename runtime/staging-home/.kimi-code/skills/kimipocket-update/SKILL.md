@@ -60,9 +60,12 @@ cd /sdcard/Download
 # 第一步：从 GitHub API 查最新版 APK 的真实下载地址（资产名带版本号，没有固定链接）
 url=$(curl -s https://api.github.com/repos/yang12535/kimipocket/releases/latest \
   | grep -o '"browser_download_url": *"[^"]*\.apk"' | head -1 | cut -d'"' -f4)
-# 第二步：下载
+# 第二步：校验拿到了地址——为空说明 API 结构变了或没命中 .apk，
+# 别硬下载，让用户去 https://github.com/yang12535/kimipocket/releases 手动下
+if [ -z "$url" ]; then echo "没查到 APK 下载地址，请打开 releases 页面手动下载"; exit 1; fi
+# 第三步：下载
 curl -L -o kimipocket-latest.apk "$url"
-# 第三步：核对大小——正常应大于 80MB；只有几十 KB 就是下到了 404 页面，
+# 第四步：核对大小——正常应大于 80MB；只有几十 KB 就是下到了 404 页面，
 # 回第一步重新核对文件名/地址
 ls -l kimipocket-latest.apk
 ```

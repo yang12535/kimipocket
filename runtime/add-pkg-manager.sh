@@ -387,7 +387,7 @@ for pkg in sorted(all_installed):
     lines.append(f"Package: {pkg}")
     lines.append("Status: install ok installed")
     # Termux 索引没有 Maintainer 字段，补占位避免 dpkg 每次解析都刷警告
-    lines.append(f"Maintainer: {info.get('Maintainer', '@termux')}")
+    lines.append(f"Maintainer: {info.get('Maintainer') or '@termux'}")
     if info.get('Priority'):
         lines.append(f"Priority: {info['Priority']}")
     if info.get('Essential'):

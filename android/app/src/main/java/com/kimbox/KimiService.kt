@@ -166,8 +166,10 @@ class KimiService : Service() {
             if (token != null) {
                 currentToken = token
                 // Web UI 从 URL fragment 读 token（#token=...），fragment 不会随请求发出
-                KimiState.url = "http://127.0.0.1:$port/#token=" + URLEncoder.encode(token, "UTF-8")
+                // 先写 port 再写 url：UI 看到新 url 就会 loadUrl，此时 port 必须已就绪，
+                // 否则 shouldOverrideUrlLoading 会把引擎导航误判成外部链接跳浏览器
                 KimiState.port = port
+                KimiState.url = "http://127.0.0.1:$port/#token=" + URLEncoder.encode(token, "UTF-8")
                 KimiState.status = "运行中"
                 KimiState.running = true
                 KimiState.lastError = null
