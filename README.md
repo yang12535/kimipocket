@@ -90,10 +90,15 @@ APK
 ```bash
 cd runtime
 #   1) ssh 到手机执行 extract-phone-runtime.sh > phone-runtime.tar.gz
+#      （同时从手机 scp 回 dpkg-meta.tar.gz 解到 phone-dpkg-info/）
 #   2) python3 patch_runtime.py        # 解包 → 补丁 com.termux→com.kimbox → staging-final/usr
 #   3) ./add-pkg-manager.sh            # 从清华源抽 apt/dpkg/keyring 等 21 个包合并进 staging-final
-#   4) tar --numeric-owner --owner=0 --group=0 -czf runtime.pkg -C staging-final usr
-#   5) 制作 kimihome.pkg（tar czf，内容是一个 .kimi-code/ 目录：
+#                                       # + 安装 deb 重写钩子（hooks/ → staging-final/usr/libexec/）
+#   4) ./merge-phone-dpkg-info.sh      # 合并手机 dpkg 元数据，补齐 .list/.md5sums/.conffiles
+#                                       # （md5sums 基于重写后的 staging 实算，dpkg -V 干净）
+#   5) ./pre-tar-check.sh              # 前置校验：钩子、apt 配置、包清单齐全才放行
+#   6) tar --numeric-owner --owner=0 --group=0 -czf runtime.pkg -C staging-final usr
+#   7) 制作 kimihome.pkg（tar czf，内容是一个 .kimi-code/ 目录：
 #      config.toml 选默认模型、region 标记；不要放任何 token/凭据）
 cp runtime.pkg kimihome.pkg ../android/app/src/main/assets/
 ```

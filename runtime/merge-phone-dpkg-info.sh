@@ -232,6 +232,49 @@ for pkg in sorted(new_pkgs):
     new_meta[pkg] = {"version": control["Version"], "conf": conf_records}
 print(f"新包 info 文件生成 {n_new_files} 个（含 list/md5sums/conffiles/脚本）")
 
+# ── 重算 .md5sums（基于重写后的 staging 实际文件）────────────
+# issue #10: deb 原始 .md5sums 记录的是 com.termux 路径下的文件哈希，
+# 但 staging 里的文件内容已经做了 com.termux→com.kimbox 等长重写，
+# 导致 dpkg -V 校验时报大量 MD5 不匹配。
+# 此段遍历全部包（旧+新），根据 .list 里记录的绝对路径在 staging-final
+# 中实算 md5 并覆盖 .md5sums。
+# 注意：Conffiles（status 中）和 .conffiles 文件里的基准哈希**不动**——
+# 它们用于 dpkg 判定用户是否改过配置文件（升级时决定是否保留用户版本），
+# 保持 deb 原始值才能让 dpkg 正确识别「用户修改」。
+# .md5sums 仅用于 dpkg -V 完整性校验，与 Conffiles 追踪语义不同。
+print("\n── 重算 .md5sums（基于 staging 实际文件）──")
+n_md5_regen = 0
+PREFIX_ABS_PATH = "/data/data/com.kimbox/files/usr/"
+for pkg in sorted(want):
+    list_file = INFO_DST / f"{pkg}.list"
+    if not list_file.exists():
+        continue
+    md5_lines = []
+    # dpkg .md5sums 路径格式：相对文件系统根，不带前导斜杠，
+    # 即 data/data/com.kimbox/files/usr/bin/node 而非 bin/node
+    # （与原始 deb data.tar 里的路径约定一致）
+    DPKG_REL_PREFIX = "data/data/com.kimbox/files/usr/"
+    for line in list_file.read_text().split("\n"):
+        line = line.strip()
+        if not line or not line.startswith(PREFIX_ABS_PATH):
+            continue
+        rel = line[len(PREFIX_ABS_PATH):]
+        if not rel:
+            continue
+        fp = STAGING / rel
+        # 只算普通文件（非符号链接、非目录）
+        if fp.is_file() and not fp.is_symlink():
+            # 流式分块读取，避免大文件（如 node 二进制几十 MB）一次性占满内存
+            md5 = hashlib.md5()
+            with open(fp, 'rb') as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b''):
+                    md5.update(chunk)
+            md5_lines.append(f"{md5.hexdigest()}  {DPKG_REL_PREFIX}{rel}\n")
+    md5sums_file = INFO_DST / f"{pkg}.md5sums"
+    md5sums_file.write_text("".join(md5_lines))
+    n_md5_regen += 1
+print(f"重算 {n_md5_regen} 个包的 .md5sums ✓")
+
 # ── 改写 status stanza ───────────────────────────────────────
 version_changes, out_blocks = [], []
 for b in blocks:

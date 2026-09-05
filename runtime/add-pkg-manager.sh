@@ -19,7 +19,7 @@ gunzip -kf "$PKGS_GZ"
 echo "    Packages 大小: $(wc -c < pkgadd/Packages) bytes"
 
 # ── 2-9. Python 做重活 ───────────────────────────────────────────
-exec python3 - pkgadd staging-final/usr <<'PYEOF'
+python3 - pkgadd staging-final/usr <<'PYEOF'
 import sys, os, re, subprocess, shutil, struct, hashlib
 from pathlib import Path
 
@@ -430,6 +430,32 @@ for search_dir in ["share/termux-keyring", "etc/apt/trusted.gpg.d"]:
             elif os.path.isfile(fp):
                 print(f"    {os.path.relpath(fp, STAGING)}  ({os.path.getsize(fp)} bytes)")
 
+# ── 9.5 安装 deb 重写钩子 ────────────────────────────────────────
+# 从 runtime/hooks/ 复制到 staging-final/usr/，保证 apt 安装新包时
+# 自动把 deb 里的 com.termux 路径重写为 com.kimbox（见 issue #7）。
+print("\n[9.5] 安装 deb 重写钩子 ...")
+# bash 外层 cd "$(dirname "$0")" 保证 cwd 在 runtime/，hooks/ 在同级
+HOOKS_SRC = Path("hooks")
+hook_files = {
+    "usr/libexec/kimbox-deb-rewrite": 0o755,
+    "usr/libexec/kimbox-deb-rewrite.js": 0o644,
+    "usr/etc/apt/apt.conf.d/99-kimbox": 0o644,
+}
+# STAGING 已经是 staging-final/usr，rel 以 usr/ 开头需剥掉，
+# 否则目标路径变成 staging-final/usr/usr/libexec/...（双重前缀）
+for rel, mode in hook_files.items():
+    src = HOOKS_SRC / rel
+    inner_rel = rel[4:] if rel.startswith("usr/") else rel
+    dst = Path(STAGING) / inner_rel
+    if not src.exists():
+        print(f"  !! 钩子源文件缺失: {src}")
+        sys.exit(1)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(src), str(dst))
+    os.chmod(str(dst), mode)
+    print(f"    {rel} ({oct(mode)})")
+print(f"    钩子安装完成（{len(hook_files)} 个文件）")
+
 # ── 10. 汇总 ─────────────────────────────────────────────────────
 print("\n" + "="*60)
 print("汇总报告")
@@ -457,3 +483,15 @@ ret2 = subprocess.run(["du", "-sh", STAGING], capture_output=True, text=True)
 print(f"staging-final/usr 总体积: {ret2.stdout.strip().split()[0]}")
 
 PYEOF
+
+# Python 退出码透传
+if [ $? -ne 0 ]; then
+    echo "!! add-pkg-manager.sh Python 阶段失败" >&2
+    exit 1
+fi
+
+echo ""
+echo "── 下一步 ──"
+echo "  1) ./merge-phone-dpkg-info.sh    # 合并手机 dpkg 元数据 + 重算 md5sums"
+echo "  2) ./pre-tar-check.sh            # 打包前置校验"
+echo "  3) tar --numeric-owner --owner=0 --group=0 -czf runtime.pkg -C staging-final usr"

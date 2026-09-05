@@ -1,0 +1,2 @@
+// 安装前把 deb 内的 com.termux 路径/内容重写为本应用前缀（等长 10 字符替换）
+DPkg::Pre-Install-Pkgs { "/data/data/com.kimbox/files/usr/libexec/kimbox-deb-rewrite"; };
