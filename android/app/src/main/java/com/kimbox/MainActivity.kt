@@ -1,6 +1,7 @@
 package com.kimbox
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Color
@@ -20,6 +21,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
+import java.io.File
 
 class MainActivity : Activity() {
 
@@ -31,9 +34,16 @@ class MainActivity : Activity() {
 
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
 
+    // SAF 导出：用户从 picker 选完目标 URI 后，onActivityResult 把暂存的文件写过去
+    private var pendingExportFile: File? = null
+
     companion object {
         private const val FILE_CHOOSER_REQ = 42
+        private const val EXPORT_PICKER_REQ = 43
     }
+
+    /** agent 把要导出的文件放这里，用户通过导出按钮走 SAF 保存到公共位置 */
+    private fun exportsDir(): File = File(filesDir, "home/exports")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -121,6 +131,28 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(overlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // 右下角浮动导出按钮：点它走 SAF 把 ~/exports/ 里的文件存到公共位置
+        val exportBtn = TextView(this).apply {
+            text = "\uD83D\uDCE4" // 📤
+            contentDescription = "导出文件"
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setBackgroundColor(0xCC333333.toInt())
+            setTextColor(Color.WHITE)
+            setOnClickListener { showExportDialog() }
+            setOnLongClickListener {
+                Toast.makeText(this@MainActivity, "导出文件", Toast.LENGTH_SHORT).show()
+                true
+            }
+        }
+        val btnSize = (56 * resources.displayMetrics.density).toInt()
+        val btnMargin = (16 * resources.displayMetrics.density).toInt()
+        root.addView(exportBtn, FrameLayout.LayoutParams(btnSize, btnSize).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            setMargins(0, 0, btnMargin, btnMargin)
+        })
+
         setContentView(root)
 
         handler.post(poller)
@@ -147,6 +179,57 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun showExportDialog() {
+        val dir = exportsDir()
+        val files = if (dir.isDirectory) dir.listFiles()?.filter { it.isFile } ?: emptyList() else emptyList()
+        if (files.isEmpty()) {
+            Toast.makeText(this, "没有可导出的文件\n让 Kimi 先把文件放到 ~/exports/ 目录", Toast.LENGTH_LONG).show()
+            return
+        }
+        val names = files.map { it.name }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("选择要导出的文件")
+            .setItems(names) { _, which -> launchExportPicker(files[which]) }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun launchExportPicker(file: File) {
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_TITLE, file.name)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        try {
+            pendingExportFile = file
+            startActivityForResult(intent, EXPORT_PICKER_REQ)
+        } catch (e: ActivityNotFoundException) {
+            pendingExportFile = null
+            Toast.makeText(this, "系统没有可用的文件保存器", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun writeExportToUri(file: File, uri: Uri) {
+        Thread {
+            try {
+                val out = contentResolver.openOutputStream(uri)
+                    ?: throw java.io.IOException("无法打开目标文件（openOutputStream 返回 null）")
+                out.use { file.inputStream().use { src -> src.copyTo(it) } }
+                handler.post {
+                    Toast.makeText(this, "已导出：${file.name}", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                handler.post {
+                    Toast.makeText(this, "导出失败：${e.message}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                pendingExportFile = null
+            }
+        }.start()
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == FILE_CHOOSER_REQ) {
@@ -164,6 +247,21 @@ class MainActivity : Activity() {
                 cb.onReceiveValue(uris.toTypedArray())
             } else {
                 cb.onReceiveValue(null)
+            }
+        } else if (requestCode == EXPORT_PICKER_REQ) {
+            val file = pendingExportFile
+            pendingExportFile = null
+            if (resultCode == RESULT_OK && data?.data != null && file != null) {
+                // 持久化 URI 权限以备异步写入——只请求 picker 实际授予的权限（data.flags 掩码），
+                // 固定传 READ|WRITE 会在只授予一种权限的 picker 上抛 SecurityException
+                try {
+                    val persistFlags = data!!.flags and
+                        (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    if (persistFlags != 0) {
+                        contentResolver.takePersistableUriPermission(data.data!!, persistFlags)
+                    }
+                } catch (_: Exception) { /* 部分 picker 不支持持久化，不影响当次写入 */ }
+                writeExportToUri(file, data.data!!)
             }
         } else {
             @Suppress("DEPRECATION")
