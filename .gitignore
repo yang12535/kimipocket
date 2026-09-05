@@ -10,6 +10,7 @@ runtime/staging/
 runtime/staging-phone/
 runtime/staging-final/
 runtime/pkgadd/
+runtime/phone-dpkg-info/
 runtime/debs/
 runtime/phone-runtime.tar.gz
 moonshot-ai-kimi-code-*.tgz

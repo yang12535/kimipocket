@@ -37,6 +37,21 @@ grep -v -e '^/data/data/com.termux/files/usr/var/lib/dpkg' \
         -e '/share/man/' -e '/share/doc/' -e '/share/info/' "$LIST" > "$LIST.f" || true
 mv "$LIST.f" "$LIST"
 
+# 同时导出 dpkg 元数据（PC 侧 merge-phone-dpkg-info.sh 的输入）：
+# 版本清单 + status 原文（含 Conffiles 记录）+ 整个 info/ 目录。
+# 单独打成 dpkg-meta.tar.gz 留在手机 tmp 下，scp 取回后解到 runtime/phone-dpkg-info/
+META=/data/data/com.termux/files/usr/tmp/dpkg-meta
+rm -rf "$META"
+mkdir -p "$META/info"
+dpkg-query -W -f '${Package}\t${Version}\t${Architecture}\t${db:Status-Abbrev}\n' \
+  > "$META/phone-versions.tsv"
+cp /data/data/com.termux/files/usr/var/lib/dpkg/status "$META/status.phone"
+cp /data/data/com.termux/files/usr/var/lib/dpkg/info/* "$META/info/"
+tar czf /data/data/com.termux/files/usr/tmp/dpkg-meta.tar.gz -C \
+  /data/data/com.termux/files/usr/tmp dpkg-meta
+rm -rf "$META"
+echo "DPKG-META: /data/data/com.termux/files/usr/tmp/dpkg-meta.tar.gz" >&2
+
 TOTAL=$(cat "$LIST" | wc -l)
 echo "FILES: $TOTAL" >&2
 du -sch $(cat "$LIST" | head -100000) 2>/dev/null | tail -1 >&2 || true

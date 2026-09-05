@@ -26,7 +26,10 @@
     └── drafts/      # 草稿箱：小事、临时状态先进这里
 ```
 
-- `git init` 后立即做首次 commit（`记忆库初始化`），全程本地，**不配置任何远端**。
+- `git init` 后先设置本仓库的提交身份再 commit（本机没有全局 git 身份，不设会报
+  `Please tell me who you are`）：`git config --local user.name kimi-pocket`、
+  `git config --local user.email kimi-pocket@localhost`。然后立即做首次 commit
+  （`记忆库初始化`），全程本地，**不配置任何远端**。
 - 仅当 `~/memory` 已被非记忆库内容占用时才停下来问用户换路径。
 
 ### 日常行为

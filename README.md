@@ -63,7 +63,10 @@ APK
 
 - **引擎认证**：`kimi web` 只绑 `127.0.0.1`，并启用内置 bearer token 认证
   （首启自动生成 `~/.kimi-code/server.token`，0600）。App 读取 token 后经
-  URL fragment（`#token=...`）注入 WebView；fragment 不随 HTTP 请求发出，不进日志。
+  URL fragment（`#token=...`）注入 WebView。fragment 不随 HTTP 请求发出，
+  不进网络请求与服务端日志；但注意：引擎启动 banner 会把 token 明文打印进
+  应用私有日志 `files/logs/kimi.log`（应用私有目录，非 root 读不到），
+  崩溃界面也会展示日志尾巴——截图分享前注意给 token 打码。
 - **端口固定 17234**（被占用时退随机端口）：WebView 的 localStorage 按
   scheme+host+port 隔离，固定端口保证引擎重启后 Web UI 的本地状态不丢。
 - **就绪探测带指纹**：不是"端口能连上就放行"，而是要求 `GET /api/v1/healthz`
@@ -122,13 +125,21 @@ EOF
 
 ## 升级与数据保留
 
-- **覆盖安装（同签名）**：`home/`（登录态、配置）与 `workspace/`（产出物）都保留。
-  初始配置只在缺失时写入，升级永不覆盖已登录状态。
+- **覆盖安装（同签名）**：只动 `usr/`（运行时）；`home/`（登录态、配置、记忆库
+  `~/memory`）与 `workspace/`（产出物）都保留。初始配置只在缺失时写入，
+  升级永不覆盖已登录状态。
 - **运行时升级**：APK 内 `runtime.pkg` 变化时（`RUNTIME_VERSION` +1），下次启动
-  只重解压 `usr/` 目录，不动 `home/`。
+  会清空 `usr/` 全新解压，不动 `home/`。注意：之前用 apt/pkg 装的软件包会丢，
+  需要重装；agent 用 npm 自升级的引擎同理会被打包版本覆盖。
 - **引擎自升级**：环境里有完整 npm + apt，理论上 agent 可以执行
   `npm i -g @moonshot-ai/kimi-code` 原地升级自身，`pkg install` 补系统依赖
   ——这也是保留 `home/` 的另一个原因。
+- **签名谱系（重要）**：v0.2.0 起更换了签名证书（旧 keystore 口令丢失作废）。
+  旧证书 SHA-256：`8d145982…341e3`（v0.1.x）；新证书 SHA-256：
+  `541e2a1f…0d51`（v0.2.0+）。**从 v0.1.x 升级必须先卸载再装**——卸载会清掉
+  应用数据：登录态要重新授权；workspace 里的文件先备份（卸载前连电脑
+  拉取 `Android/data/com.kimbox/files/workspace`，或让 Kimi 先复制到
+  `Download/下载` 目录）。新谱系内（v0.2.0 起）覆盖安装一切保留。
 
 ## 已知坑 / TODO
 
@@ -138,5 +149,8 @@ EOF
   `adb shell settings put global settings_enable_monitor_phantom_procs false`
 - 国产 ROM 杀后台：需把 App 加入电池优化白名单/自启动白名单
 - node-pty 未打包（npm 可选依赖），Web 终端功能暂缺
+- 不要手工 `dpkg -i` 装网上下载的 deb：这会绕过 `DPkg::Pre-Install-Pkgs`
+  路径重写钩子，deb 里硬编码的 `com.termux` 路径没被改写，安装会失败。
+  装包只走 `pkg` / `apt`
 - 引擎连续崩溃 5 次后停止自动重启（防烧电死循环），重新打开 App 即可再试；
   若是运行时损坏（链接器/模块错误），会触发自愈自动重解压，见上文「变砖自愈」
