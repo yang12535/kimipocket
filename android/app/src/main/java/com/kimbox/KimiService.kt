@@ -65,7 +65,7 @@ class KimiService : Service() {
         startForegroundWithText("正在启动…")
         acquireWakeLock()
         if (intent?.action == ACTION_RESTART) {
-            // 通知栏「重启引擎」按钮：通知旧引擎线程退出，然后启新的
+            // 通知栏「重启引擎」按钮：立即终止旧进程，等旧线程自然退出后启新的
             restartRequested = true
             stopped = true
             process?.destroy()
@@ -74,15 +74,22 @@ class KimiService : Service() {
             engineThreadRunning = true
             stopped = false
             restartRequested = false
-            Thread {
-                try {
-                    run()
-                } finally {
-                    engineThreadRunning = false
-                }
-            }.start()
+            startEngineThread()
         }
         return START_STICKY
+    }
+
+    /**
+     * 启动引擎工作线程。线程结束时检查是否有挂起的重启请求：
+     * 若有则 handedOff=true，调用方不清 engineThreadRunning（由新线程的 finally 负责）；
+     * 若无则 handedOff=false，调用方清 engineThreadRunning 释放槽位。
+     * 这避免了「旧线程 finally 清掉标志 → 新线程已在跑但标志为 false」的竞态。
+     */
+    private fun startEngineThread() {
+        Thread {
+            val handedOff = try { run() } catch (_: Throwable) { false }
+            if (!handedOff) engineThreadRunning = false
+        }.start()
     }
 
     override fun onDestroy() {
@@ -105,7 +112,14 @@ class KimiService : Service() {
         super.onDestroy()
     }
 
-    private fun run() {
+    /**
+     * 引擎主循环。返回 true 表示已将控制权交给新的重启线程（调用方不清 engineThreadRunning）；
+     * 返回 false 表示本线程彻底结束，调用方应释放 engineThreadRunning。
+     *
+     * 所有退出路径（正常 startKimiLoop 返回、bootstrap 重试 3 次放弃、stopped 导致 while 退出）
+     * 都汇聚到末尾的 honorRestart()，确保任何时机收到的重启请求都不会被吞掉。
+     */
+    private fun run(): Boolean {
         var attempts = 0
         while (!stopped) {
             try {
@@ -113,18 +127,7 @@ class KimiService : Service() {
                 RuntimeInstaller.ensureHome(applicationContext)
                 prepareWorkspace()
                 startKimiLoop()
-                // startKimiLoop 正常返回 = 引擎线程正常退出（stopped=true）
-                // 若由「重启引擎」触发，拉起新线程重新启动
-                if (stopped && restartRequested) {
-                    engineThreadRunning = true
-                    restartRequested = false
-                    stopped = false
-                    selfHealed = false
-                    Thread {
-                        try { run() } finally { engineThreadRunning = false }
-                    }.start()
-                }
-                return
+                return honorRestart()
             } catch (t: Throwable) {
                 attempts++
                 android.util.Log.e("kimbox", "engine bootstrap failed (attempt $attempts)", t)
@@ -132,7 +135,7 @@ class KimiService : Service() {
                 if (attempts >= 3) {
                     KimiState.status = "启动失败（已自动重试 $attempts 次）。请重新打开 App；仍不行则在系统设置里清除本应用数据（会退出登录）后重试"
                     updateNotification("启动失败：${t.message}")
-                    return
+                    return honorRestart()
                 }
                 KimiState.status = "启动失败（${t.message}），30 秒后自动重试（$attempts/3）…"
                 updateNotification("启动失败，稍后自动重试")
@@ -143,6 +146,20 @@ class KimiService : Service() {
                 }
             }
         }
+        return honorRestart()
+    }
+
+    /**
+     * 检查是否有挂起的重启请求。若有则启动新线程接管引擎，返回 true（告诉调用方不要清 engineThreadRunning）。
+     * 若无则返回 false，调用方正常释放。
+     */
+    private fun honorRestart(): Boolean {
+        if (!restartRequested) return false
+        restartRequested = false
+        stopped = false
+        selfHealed = false
+        startEngineThread()
+        return true
     }
 
     private fun workspaceDir(): File {
@@ -451,7 +468,7 @@ class KimiService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        // 「重启引擎」动作：让 npm 升级后的新引擎生效，不杀服务（当前 agent 任务跑完再退）
+        // 「重启引擎」动作：让 npm 升级后的新引擎生效（立即终止旧进程，正在跑的任务会被中断）
         val restartIntent = Intent(this, KimiService::class.java).apply {
             action = ACTION_RESTART
         }

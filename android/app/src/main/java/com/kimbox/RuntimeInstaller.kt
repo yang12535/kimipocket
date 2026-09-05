@@ -21,6 +21,12 @@ object RuntimeInstaller {
     // 每次 runtime.pkg 内容变化时 +1，触发已装机型的重解压（不动 home/，不影响登录态）
     private const val RUNTIME_VERSION = 6
 
+    // home/ 种子文件版本号：当种子内容变化时 +1，触发已装机型的覆盖更新（仅限用户未修改的文件）。
+    // 通过比对设备文件哈希与上次种子哈希判断用户是否改过：
+    // - 哈希匹配 → 用户未改 → 安全覆盖
+    // - 哈希不匹配 → 用户改过 → 跳过并记日志
+    private const val SEED_VERSION = 2
+
     // 解压后约 350MB（usr/ ~233MB + 缓存增长余量），低于这个值宁可报错也别解一半
     private const val MIN_FREE_BYTES = 700L * 1024 * 1024
 
@@ -81,21 +87,77 @@ object RuntimeInstaller {
         ready.writeText("1\n")
     }
 
-    /** 老装机补偿：记忆模块的注入文件缺失时单独补种（不整包重解压，不覆盖已存在的文件） */
+    /**
+     * 老装机补偿 + 版本更新：记忆模块的注入文件缺失时单独补种（不整包重解压）。
+     * 当 SEED_VERSION 增加时，覆盖用户未修改过的旧种子（通过哈希比对判断）：
+     * - 文件不存在 → 写入新种子
+     * - 文件存在且哈希匹配上次种子 → 用户未改 → 覆盖为新版本
+     * - 文件存在但哈希不匹配 → 用户改过 → 跳过并记日志
+     *
+     * 首次迁移（无哈希文件）：不覆盖现有文件（安全默认），但记录当前哈希作为基线，
+     * 后续版本更新可正确检测用户修改。
+     */
     @Synchronized
     fun ensureAgentsMd(ctx: Context) {
         val seeds = listOf(
             ".kimi-code/AGENTS.md",
             ".kimi-code/skills/kimipocket-update/SKILL.md",
         )
+
+        // 检查种子版本是否需要更新
+        val versionFile = File(ctx.filesDir, "home/.kimi-code/.seed_version")
+        val installedVersion = try {
+            if (versionFile.exists()) versionFile.readText().trim().toIntOrNull() else null
+        } catch (_: Exception) { null }
+        val needsUpdate = installedVersion != SEED_VERSION
+
         for (name in seeds) {
             val target = File(ctx.filesDir, "home/$name")
-            if (target.exists()) continue
             val data = readAssetEntry(ctx, "kimihome.pkg", name) ?: continue
-            target.parentFile?.mkdirs()
-            target.writeBytes(data)
-            android.util.Log.i("kimbox", "seeded home/$name")
+            val hashFile = File(target.parentFile, "${target.name}.seedhash")
+            val lastSeedHash = try {
+                if (hashFile.exists()) hashFile.readText().trim() else null
+            } catch (_: Exception) { null }
+
+            if (!target.exists()) {
+                // 文件缺失：始终补种
+                target.parentFile?.mkdirs()
+                target.writeBytes(data)
+                hashFile.writeText(sha256hex(data))
+                android.util.Log.i("kimbox", "seeded home/$name (missing)")
+            } else if (needsUpdate) {
+                // 版本变更：检查用户是否修改过
+                val currentHash = sha256hex(target.readBytes())
+                if (lastSeedHash != null && currentHash == lastSeedHash) {
+                    // 哈希匹配 → 用户未改 → 安全覆盖
+                    target.writeBytes(data)
+                    hashFile.writeText(sha256hex(data))
+                    android.util.Log.i("kimbox", "updated seed home/$name (v$SEED_VERSION)")
+                } else {
+                    // 哈希不匹配或首次迁移（lastSeedHash=null）→ 用户可能改过 → 跳过
+                    // 但记录当前哈希作为基线，下次版本更新时可正确检测
+                    if (lastSeedHash == null) {
+                        hashFile.writeText(currentHash)
+                        android.util.Log.i("kimbox", "baseline hash recorded for home/$name (first migration)")
+                    } else {
+                        android.util.Log.i("kimbox", "skipping seed home/$name: user-customized")
+                    }
+                }
+            }
+            // else: 版本相同且文件存在 → 不动
         }
+
+        // 写入版本标记
+        if (needsUpdate) {
+            versionFile.parentFile?.mkdirs()
+            versionFile.writeText("$SEED_VERSION\n")
+        }
+    }
+
+    /** SHA-256 哈希（十六进制字符串） */
+    private fun sha256hex(bytes: ByteArray): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        return md.digest(bytes).joinToString("") { "%02x".format(it) }
     }
 
     private fun readAssetEntry(ctx: Context, asset: String, wantName: String): ByteArray? {
