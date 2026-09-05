@@ -250,7 +250,7 @@ class KimiService : Service() {
         return try {
             KimiState.status = "检测到运行时损坏，正在自动修复（重装引擎，不影响登录）…"
             updateNotification("运行时损坏，正在自动修复…")
-            File(filesDir, "usr").deleteRecursively()
+            deleteRecursivelyNoFollow(File(filesDir, "usr"))
             RuntimeInstaller.ensureInstalled(applicationContext)
             RuntimeInstaller.ensureHome(applicationContext)
             true
