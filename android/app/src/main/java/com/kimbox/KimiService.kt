@@ -25,6 +25,10 @@ class KimiService : Service() {
         private const val CHANNEL_ID = "kimi"
         private const val NOTIF_ID = 1
 
+        // 通知栏「重启引擎」动作
+        const val ACTION_RESTART = "com.kimbox.action.RESTART_ENGINE"
+        private const val REQ_RESTART = 1
+
         // 固定端口让 WebView 的 localStorage（同源按端口隔离）在重启后仍然有效；
         // 被占用时才退到随机端口
         private const val PREFERRED_PORT = 17234
@@ -42,8 +46,11 @@ class KimiService : Service() {
 
     private var process: Process? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    /** 日志泵线程：进程退出后需 join 确保所有输出落盘再做自愈判定 */
+    private var logPumpThread: Thread? = null
     @Volatile private var stopped = false
     @Volatile private var engineThreadRunning = false
+    @Volatile private var restartRequested = false
 
     /** 本次引擎进程启动时 kimi.log 的字节偏移：自愈判定只看本次新产生的输出，不吃历史旧错误 */
     @Volatile private var logStartOffset = 0L
@@ -57,18 +64,32 @@ class KimiService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundWithText("正在启动…")
         acquireWakeLock()
+        if (intent?.action == ACTION_RESTART) {
+            // 通知栏「重启引擎」按钮：立即终止旧进程，等旧线程自然退出后启新的
+            restartRequested = true
+            stopped = true
+            process?.destroy()
+        }
         if (!engineThreadRunning) {
             engineThreadRunning = true
             stopped = false
-            Thread {
-                try {
-                    run()
-                } finally {
-                    engineThreadRunning = false
-                }
-            }.start()
+            restartRequested = false
+            startEngineThread()
         }
         return START_STICKY
+    }
+
+    /**
+     * 启动引擎工作线程。线程结束时检查是否有挂起的重启请求：
+     * 若有则 handedOff=true，调用方不清 engineThreadRunning（由新线程的 finally 负责）；
+     * 若无则 handedOff=false，调用方清 engineThreadRunning 释放槽位。
+     * 这避免了「旧线程 finally 清掉标志 → 新线程已在跑但标志为 false」的竞态。
+     */
+    private fun startEngineThread() {
+        Thread {
+            val handedOff = try { run() } catch (_: Throwable) { false }
+            if (!handedOff) engineThreadRunning = false
+        }.start()
     }
 
     override fun onDestroy() {
@@ -91,7 +112,14 @@ class KimiService : Service() {
         super.onDestroy()
     }
 
-    private fun run() {
+    /**
+     * 引擎主循环。返回 true 表示已将控制权交给新的重启线程（调用方不清 engineThreadRunning）；
+     * 返回 false 表示本线程彻底结束，调用方应释放 engineThreadRunning。
+     *
+     * 所有退出路径（正常 startKimiLoop 返回、bootstrap 重试 3 次放弃、stopped 导致 while 退出）
+     * 都汇聚到末尾的 honorRestart()，确保任何时机收到的重启请求都不会被吞掉。
+     */
+    private fun run(): Boolean {
         var attempts = 0
         while (!stopped) {
             try {
@@ -99,7 +127,7 @@ class KimiService : Service() {
                 RuntimeInstaller.ensureHome(applicationContext)
                 prepareWorkspace()
                 startKimiLoop()
-                return
+                return honorRestart()
             } catch (t: Throwable) {
                 attempts++
                 android.util.Log.e("kimbox", "engine bootstrap failed (attempt $attempts)", t)
@@ -107,7 +135,7 @@ class KimiService : Service() {
                 if (attempts >= 3) {
                     KimiState.status = "启动失败（已自动重试 $attempts 次）。请重新打开 App；仍不行则在系统设置里清除本应用数据（会退出登录）后重试"
                     updateNotification("启动失败：${t.message}")
-                    return
+                    return honorRestart()
                 }
                 KimiState.status = "启动失败（${t.message}），30 秒后自动重试（$attempts/3）…"
                 updateNotification("启动失败，稍后自动重试")
@@ -118,6 +146,20 @@ class KimiService : Service() {
                 }
             }
         }
+        return honorRestart()
+    }
+
+    /**
+     * 检查是否有挂起的重启请求。若有则启动新线程接管引擎，返回 true（告诉调用方不要清 engineThreadRunning）。
+     * 若无则返回 false，调用方正常释放。
+     */
+    private fun honorRestart(): Boolean {
+        if (!restartRequested) return false
+        restartRequested = false
+        stopped = false
+        selfHealed = false
+        startEngineThread()
+        return true
     }
 
     private fun workspaceDir(): File {
@@ -179,6 +221,8 @@ class KimiService : Service() {
                 try { p.destroy() } catch (_: Throwable) {}
             }
             val code = try { p.waitFor() } catch (_: InterruptedException) { break }
+            // 等日志泵线程把所有剩余输出刷完再做判定，否则关键错误可能被截掉
+            try { logPumpThread?.join(2000) } catch (_: Throwable) {}
             process = null
             KimiState.url = null
             KimiState.port = null
@@ -187,9 +231,12 @@ class KimiService : Service() {
             val crashes = recordCrash(crashTimes)
             // 把引擎日志尾巴亮出来，别让小白用户只看到"退出码=1"干瞪眼；
             // 只取本次进程新产生的输出：历史旧错误文本不该触发对完好运行时的自愈
-            val logTail = tailOfLog(logStartOffset)
-            if (logTail != null) KimiState.lastError = logTail
-            if (looksLikeBrokenRuntime(logTail) && trySelfHeal()) {
+            val displayTail = tailOfLog(logStartOffset)
+            if (displayTail != null) KimiState.lastError = displayTail
+            // 自愈判定用完整诊断尾部（8KB），不做 3 行裁剪：
+            // Node 模块缺失错误的关键词常出现在输出中段，3 行截断会把它推出窗口
+            val diagTail = tailOfLogForDiagnosis(logStartOffset)
+            if (looksLikeBrokenRuntime(diagTail) && trySelfHeal()) {
                 // 自愈后是全新运行时，崩溃窗口一并清零重新计
                 crashTimes.clear()
                 continue
@@ -230,6 +277,24 @@ class KimiService : Service() {
             redact(String(bytes, off.toInt(), (bytes.size - off).toInt()))
                 .lines().map { it.trim() }.filter { it.isNotEmpty() }
                 .takeLast(3).joinToString("\n").take(500).ifBlank { null }
+        } catch (_: Throwable) { null }
+    }
+
+    /**
+     * 自愈判定用的诊断尾部：保留本次进程增量的最后 8KB，不做 3 行裁剪。
+     * Node 模块缺失错误输出形如「Cannot find module ... requireStack: [] } Node.js vXX」，
+     * 关键词在中段，3 行截断会让 looksLikeBrokenRuntime 永远看不到关键词。
+     * 仍保留 redact() 脱敏。
+     */
+    private fun tailOfLogForDiagnosis(fromOffset: Long): String? {
+        return try {
+            val f = File(filesDir, "logs/kimi.log")
+            if (!f.isFile) return null
+            val bytes = f.readBytes()
+            var off = fromOffset
+            if (off < 0 || off > bytes.size) off = 0
+            if (bytes.size - off > 8192L) off = bytes.size - 8192L
+            redact(String(bytes, off.toInt(), (bytes.size - off).toInt())).ifBlank { null }
         } catch (_: Throwable) { null }
     }
 
@@ -339,7 +404,7 @@ class KimiService : Service() {
 
         val p = pb.start()
         val bannerRe = Regex("""Local:\s+http://127\.0\.0\.1:(\d+)""")
-        Thread {
+        val pump = Thread {
             try {
                 FileWriter(logFile, true).use { w ->
                     p.inputStream.bufferedReader().forEachLine { line ->
@@ -352,7 +417,9 @@ class KimiService : Service() {
                     }
                 }
             } catch (_: Throwable) {}
-        }.start()
+        }
+        pump.start()
+        logPumpThread = pump
         return p
     }
 
@@ -406,11 +473,24 @@ class KimiService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        // 「重启引擎」动作：让 npm 升级后的新引擎生效（立即终止旧进程，正在跑的任务会被中断）
+        val restartIntent = Intent(this, KimiService::class.java).apply {
+            action = ACTION_RESTART
+        }
+        val restartPi = PendingIntent.getService(
+            this, REQ_RESTART, restartIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("口袋Kimi")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pi)
+            .addAction(
+                android.R.drawable.ic_menu_rotate,
+                "重启引擎",
+                restartPi
+            )
             .setOngoing(true)
             .build()
     }
