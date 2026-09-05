@@ -442,9 +442,12 @@ hook_files = {
     "usr/libexec/kimbox-deb-rewrite.js": 0o644,
     "usr/etc/apt/apt.conf.d/99-kimbox": 0o644,
 }
+# STAGING 已经是 staging-final/usr，rel 以 usr/ 开头需剥掉，
+# 否则目标路径变成 staging-final/usr/usr/libexec/...（双重前缀）
 for rel, mode in hook_files.items():
     src = HOOKS_SRC / rel
-    dst = Path(STAGING) / rel
+    inner_rel = rel[4:] if rel.startswith("usr/") else rel
+    dst = Path(STAGING) / inner_rel
     if not src.exists():
         print(f"  !! 钩子源文件缺失: {src}")
         sys.exit(1)

@@ -250,6 +250,10 @@ for pkg in sorted(want):
     if not list_file.exists():
         continue
     md5_lines = []
+    # dpkg .md5sums 路径格式：相对文件系统根，不带前导斜杠，
+    # 即 data/data/com.kimbox/files/usr/bin/node 而非 bin/node
+    # （与原始 deb data.tar 里的路径约定一致）
+    DPKG_REL_PREFIX = "data/data/com.kimbox/files/usr/"
     for line in list_file.read_text().split("\n"):
         line = line.strip()
         if not line or not line.startswith(PREFIX_ABS_PATH):
@@ -261,7 +265,7 @@ for pkg in sorted(want):
         # 只算普通文件（非符号链接、非目录）
         if fp.is_file() and not fp.is_symlink():
             h = hashlib.md5(fp.read_bytes()).hexdigest()
-            md5_lines.append(f"{h}  {rel}\n")
+            md5_lines.append(f"{h}  {DPKG_REL_PREFIX}{rel}\n")
     md5sums_file = INFO_DST / f"{pkg}.md5sums"
     md5sums_file.write_text("".join(md5_lines))
     n_md5_regen += 1

@@ -49,7 +49,8 @@ check_dir  "var/lib/dpkg/info" "包元数据目录"
 
 # 包清单（status 中至少要有 60+ 个 installed 包）
 if [ -f "$STAGING/var/lib/dpkg/status" ]; then
-    N_INSTALLED=$(grep -c '^Status: install ok installed' "$STAGING/var/lib/dpkg/status" 2>/dev/null || echo 0)
+    N_INSTALLED=$(grep -c '^Status: install ok installed' "$STAGING/var/lib/dpkg/status" 2>/dev/null) || true
+    N_INSTALLED=${N_INSTALLED:-0}
     if [ "$N_INSTALLED" -lt 60 ]; then
         echo "!! status 中仅 $N_INSTALLED 个已安装包（预期 ≥60）" >&2
         ERRORS=$((ERRORS + 1))
