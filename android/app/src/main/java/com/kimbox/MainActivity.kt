@@ -135,6 +135,7 @@ class MainActivity : Activity() {
         // 右下角浮动导出按钮：点它走 SAF 把 ~/exports/ 里的文件存到公共位置
         val exportBtn = TextView(this).apply {
             text = "\uD83D\uDCE4" // 📤
+            contentDescription = "导出文件"
             textSize = 22f
             gravity = Gravity.CENTER
             setBackgroundColor(0xCC333333.toInt())
@@ -198,6 +199,8 @@ class MainActivity : Activity() {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
             putExtra(Intent.EXTRA_TITLE, file.name)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
         try {
             pendingExportFile = file
@@ -211,9 +214,9 @@ class MainActivity : Activity() {
     private fun writeExportToUri(file: File, uri: Uri) {
         Thread {
             try {
-                contentResolver.openOutputStream(uri)?.use { out ->
-                    file.inputStream().use { it.copyTo(out) }
-                }
+                val out = contentResolver.openOutputStream(uri)
+                    ?: throw java.io.IOException("无法打开目标文件（openOutputStream 返回 null）")
+                out.use { file.inputStream().use { src -> src.copyTo(it) } }
                 handler.post {
                     Toast.makeText(this, "已导出：${file.name}", Toast.LENGTH_SHORT).show()
                 }
@@ -249,12 +252,14 @@ class MainActivity : Activity() {
             val file = pendingExportFile
             pendingExportFile = null
             if (resultCode == RESULT_OK && data?.data != null && file != null) {
-                // 系统 picker 返回的 URI 已带写权限，持久化以备异步线程使用
+                // 持久化 URI 权限以备异步写入——只请求 picker 实际授予的权限（data.flags 掩码），
+                // 固定传 READ|WRITE 会在只授予一种权限的 picker 上抛 SecurityException
                 try {
-                    contentResolver.takePersistableUriPermission(
-                        data.data!!,
-                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
+                    val persistFlags = data!!.flags and
+                        (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    if (persistFlags != 0) {
+                        contentResolver.takePersistableUriPermission(data.data!!, persistFlags)
+                    }
                 } catch (_: Exception) { /* 部分 picker 不支持持久化，不影响当次写入 */ }
                 writeExportToUri(file, data.data!!)
             }
