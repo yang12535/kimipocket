@@ -264,8 +264,12 @@ for pkg in sorted(want):
         fp = STAGING / rel
         # 只算普通文件（非符号链接、非目录）
         if fp.is_file() and not fp.is_symlink():
-            h = hashlib.md5(fp.read_bytes()).hexdigest()
-            md5_lines.append(f"{h}  {DPKG_REL_PREFIX}{rel}\n")
+            # 流式分块读取，避免大文件（如 node 二进制几十 MB）一次性占满内存
+            md5 = hashlib.md5()
+            with open(fp, 'rb') as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b''):
+                    md5.update(chunk)
+            md5_lines.append(f"{md5.hexdigest()}  {DPKG_REL_PREFIX}{rel}\n")
     md5sums_file = INFO_DST / f"{pkg}.md5sums"
     md5sums_file.write_text("".join(md5_lines))
     n_md5_regen += 1

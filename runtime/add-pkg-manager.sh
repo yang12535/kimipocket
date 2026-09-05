@@ -434,8 +434,7 @@ for search_dir in ["share/termux-keyring", "etc/apt/trusted.gpg.d"]:
 # 从 runtime/hooks/ 复制到 staging-final/usr/，保证 apt 安装新包时
 # 自动把 deb 里的 com.termux 路径重写为 com.kimbox（见 issue #7）。
 print("\n[9.5] 安装 deb 重写钩子 ...")
-HOOKS_SRC = Path(__file__).parent / "hooks" if '__file__' in dir() else Path("hooks")
-# 脚本从 runtime/ 目录执行，hooks/ 在同级
+# bash 外层 cd "$(dirname "$0")" 保证 cwd 在 runtime/，hooks/ 在同级
 HOOKS_SRC = Path("hooks")
 hook_files = {
     "usr/libexec/kimbox-deb-rewrite": 0o755,

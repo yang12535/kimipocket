@@ -17,8 +17,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEST="$SCRIPT_DIR/android/app/src/main/assets"
 
 # ── 推导版本号 ────────────────────────────────────────────────────
+# 规范化：不带 v 前缀就补上，带 v 就用原样
+normalize_version() {
+    local ver="$1"
+    if [[ "$ver" =~ ^v ]]; then
+        echo "$ver"
+    else
+        echo "v$ver"
+    fi
+}
+
 if [ $# -ge 1 ]; then
-    VERSION="$1"
+    VERSION=$(normalize_version "$1")
 else
     GRADLE="$SCRIPT_DIR/android/app/build.gradle"
     if [ ! -f "$GRADLE" ]; then
@@ -33,7 +43,7 @@ else
         echo "!! build.gradle 中找不到 versionName，请手动指定版本号" >&2
         exit 1
     fi
-    VERSION="v$VERSION"
+    VERSION=$(normalize_version "$VERSION")
 fi
 echo "目标版本: $VERSION"
 
