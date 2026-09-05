@@ -17,7 +17,8 @@ metadata:
 - 报 bug / 提需求：https://github.com/yang12535/kimipocket/issues
 
 发现 bug 时鼓励发 issue：说清楚发生了什么、当时在做哪步操作。
-**发任何东西前删掉敏感信息**：日志 `files/logs/kimi.log` 里有明文 token，
+**发任何东西前删掉敏感信息**：日志 `/data/data/com.kimbox/files/logs/kimi.log`
+里有明文 token，
 `~/.kimi-code/` 下有登录凭据，这些绝不外发。
 
 ## 更新分三层，先分清用户要的是哪层
@@ -34,6 +35,8 @@ npm i -g @moonshot-ai/kimi-code@latest          # 升级
 - 升级只动 `usr/` 下的引擎文件，不碰登录态和记忆库。
 - 保险起见，升级前把 `~/memory` 备份一份：
   `tar czf /sdcard/Android/data/com.kimbox/files/workspace/memory-backup-$(date +%Y%m%d).tar.gz -C ~ memory`
+  注意：workspace 在 Android 10 及以下可被其他 App 读取，插电脑（MTP）也能看到；
+  介意隐私就把备份改放到 `~/` 私有目录（如 `~/memory-backup-$(date +%Y%m%d).tar.gz`）。
 
 ### 2. 系统包（apt/pkg）——agent 可以自己干
 
@@ -53,16 +56,23 @@ pkg upgrade         # 升级所有包
 agent 没有安装 APK 的权限，流程是：
 
 ```bash
-cd /sdcard/Android/data/com.kimbox/files/workspace
-curl -L -o kimipocket-latest.apk \
-  https://github.com/yang12535/kimipocket/releases/latest/download/kimipocket.apk
+cd /sdcard/Download
+# 第一步：从 GitHub API 查最新版 APK 的真实下载地址（资产名带版本号，没有固定链接）
+url=$(curl -s https://api.github.com/repos/yang12535/kimipocket/releases/latest \
+  | grep -o '"browser_download_url": *"[^"]*\.apk"' | head -1 | cut -d'"' -f4)
+# 第二步：校验拿到了地址——为空说明 API 结构变了或没命中 .apk，
+# 别硬下载，让用户去 https://github.com/yang12535/kimipocket/releases 手动下
+if [ -z "$url" ]; then echo "没查到 APK 下载地址，请打开 releases 页面手动下载"; exit 1; fi
+# 第三步：下载
+curl -L -o kimipocket-latest.apk "$url"
+# 第四步：核对大小——正常应大于 80MB；只有几十 KB 就是下到了 404 页面，
+# 回第一步重新核对文件名/地址
+ls -l kimipocket-latest.apk
 ```
 
-（如果上面的固定链接 404，去 releases 页面看实际文件名再下载。）
-
-然后告诉用户：打开文件管理器 → `Android/data/com.kimbox/files/workspace/` →
-点这个 APK 安装（签名一致可直接覆盖，登录态和文件都在）→ 装完打开 App，
-会自动重装运行环境（约 20 秒，界面有进度提示），属正常现象。
+然后告诉用户：打开任意文件管理器 → Download/下载目录 → 点这个 APK 安装
+（签名一致可直接覆盖，登录态和文件都在）→ 装完打开 App：若新版含运行时更新，
+首次打开会自动重装运行环境（约 20 秒，界面有进度提示）；没有运行时更新则直接可用。
 
 ## 出故障时的自救顺序
 

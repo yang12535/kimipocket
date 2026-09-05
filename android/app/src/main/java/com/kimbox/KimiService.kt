@@ -29,14 +29,28 @@ class KimiService : Service() {
         // 被占用时才退到随机端口
         private const val PREFERRED_PORT = 17234
 
-        // 连续崩溃这么多次后放弃自动重启，避免烧电死循环
+        // 时间窗内崩溃这么多次后放弃自动重启，避免烧电死循环。
+        // 注意是「窗口内累计」而不是「连续」：引擎能启动、跑一会再被杀（phantom killer/OOM）
+        // 是国产手机最常见的死法，连续计数会被每次成功启动清零而永远摸不到上限
         private const val MAX_CRASHES = 5
+        private const val CRASH_WINDOW_MS = 10 * 60 * 1000L
+
+        // token 明文会被引擎启动 banner 打进 stdout（进而落 kimi.log），落盘与上屏前都要脱敏
+        private val RE_FRAG_TOKEN = Regex("#token=\\S+")
+        private val RE_BANNER_TOKEN = Regex("(?i)token:\\s+\\S+")
     }
 
     private var process: Process? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var stopped = false
     @Volatile private var engineThreadRunning = false
+
+    /** 本次引擎进程启动时 kimi.log 的字节偏移：自愈判定只看本次新产生的输出，不吃历史旧错误 */
+    @Volatile private var logStartOffset = 0L
+    /** 从 server.token 读到的当前 token，用于日志脱敏（不用于网络探测——见 waitForServer） */
+    @Volatile private var currentToken: String? = null
+    /** 引擎 banner 自报的绑定端口（从本次 stdout 解析），用于确认 healthz 应答者是我们的进程 */
+    @Volatile private var bannerPort: Int? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -78,16 +92,31 @@ class KimiService : Service() {
     }
 
     private fun run() {
-        try {
-            RuntimeInstaller.ensureInstalled(applicationContext)
-            RuntimeInstaller.ensureHome(applicationContext)
-            prepareWorkspace()
-            startKimiLoop()
-        } catch (t: Throwable) {
-            android.util.Log.e("kimbox", "engine bootstrap failed", t)
-            KimiState.lastError = t.stackTraceToString().take(600)
-            KimiState.status = "启动失败"
-            updateNotification("启动失败：${t.message}")
+        var attempts = 0
+        while (!stopped) {
+            try {
+                RuntimeInstaller.ensureInstalled(applicationContext)
+                RuntimeInstaller.ensureHome(applicationContext)
+                prepareWorkspace()
+                startKimiLoop()
+                return
+            } catch (t: Throwable) {
+                attempts++
+                android.util.Log.e("kimbox", "engine bootstrap failed (attempt $attempts)", t)
+                KimiState.lastError = t.stackTraceToString().take(600)
+                if (attempts >= 3) {
+                    KimiState.status = "启动失败（已自动重试 $attempts 次）。请重新打开 App；仍不行则在系统设置里清除本应用数据（会退出登录）后重试"
+                    updateNotification("启动失败：${t.message}")
+                    return
+                }
+                KimiState.status = "启动失败（${t.message}），30 秒后自动重试（$attempts/3）…"
+                updateNotification("启动失败，稍后自动重试")
+                var left = 30_000L
+                while (left > 0 && !stopped) {
+                    Thread.sleep(500)
+                    left -= 500
+                }
+            }
         }
     }
 
@@ -110,14 +139,16 @@ class KimiService : Service() {
                 想让它干活，直接在聊天框里说人话就行，比如：
                 「帮我做一个记录每天开销的网页」
 
-                本目录位置：文件管理器 → Android/data/com.kimbox/files/workspace
+                本目录位置：Android/data/com.kimbox/files/workspace
+                （安卓 11 起手机上的文件管理器可能进不去这个目录：连电脑可以看到，
+                 或者直接让 Kimi 把文件复制到 Download/下载 目录）
                 """.trimIndent() + "\n"
             )
         }
     }
 
     private fun startKimiLoop() {
-        var crashes = 0
+        val crashTimes = ArrayDeque<Long>()
         while (!stopped) {
             val port = pickPort()
             KimiState.status = "正在启动 Kimi 引擎…"
@@ -126,21 +157,23 @@ class KimiService : Service() {
                 startKimiProcess(port)
             } catch (t: Throwable) {
                 KimiState.lastError = t.message
-                crashes++
-                if (giveUpIfHopeless(crashes)) break
-                sleepBackoff(crashes)
+                if (giveUpIfHopeless(recordCrash(crashTimes))) break
+                sleepBackoff(crashTimes.size)
                 continue
             }
             process = p
             val token = if (waitForServer(p, port, 45_000)) readServerToken(10_000) else null
             if (token != null) {
+                currentToken = token
                 // Web UI 从 URL fragment 读 token（#token=...），fragment 不会随请求发出
+                // 先写 port 再写 url：UI 看到新 url 就会 loadUrl，此时 port 必须已就绪，
+                // 否则 shouldOverrideUrlLoading 会把引擎导航误判成外部链接跳浏览器
+                KimiState.port = port
                 KimiState.url = "http://127.0.0.1:$port/#token=" + URLEncoder.encode(token, "UTF-8")
                 KimiState.status = "运行中"
                 KimiState.running = true
                 KimiState.lastError = null
                 updateNotification("Kimi 运行中，点我打开")
-                crashes = 0
             } else {
                 KimiState.lastError = "引擎未能正常就绪（无 server token）"
                 try { p.destroy() } catch (_: Throwable) {}
@@ -148,14 +181,17 @@ class KimiService : Service() {
             val code = try { p.waitFor() } catch (_: InterruptedException) { break }
             process = null
             KimiState.url = null
+            KimiState.port = null
             KimiState.running = false
             if (stopped) break
-            crashes++
-            // 把引擎日志尾巴亮出来，别让小白用户只看到"退出码=1"干瞪眼
-            val logTail = tailOfLog()
+            val crashes = recordCrash(crashTimes)
+            // 把引擎日志尾巴亮出来，别让小白用户只看到"退出码=1"干瞪眼；
+            // 只取本次进程新产生的输出：历史旧错误文本不该触发对完好运行时的自愈
+            val logTail = tailOfLog(logStartOffset)
             if (logTail != null) KimiState.lastError = logTail
             if (looksLikeBrokenRuntime(logTail) && trySelfHeal()) {
-                crashes = 0
+                // 自愈后是全新运行时，崩溃窗口一并清零重新计
+                crashTimes.clear()
                 continue
             }
             if (giveUpIfHopeless(crashes)) break
@@ -165,13 +201,33 @@ class KimiService : Service() {
         }
     }
 
-    private fun tailOfLog(): String? {
+    private fun recordCrash(crashTimes: ArrayDeque<Long>): Int {
+        val now = System.currentTimeMillis()
+        crashTimes.addLast(now)
+        while (!crashTimes.isEmpty() && now - crashTimes.first() > CRASH_WINDOW_MS) {
+            crashTimes.removeFirst()
+        }
+        return crashTimes.size
+    }
+
+    private fun redact(s: String): String {
+        var out = s
+        currentToken?.let { if (it.isNotEmpty()) out = out.replace(it, "***") }
+        return out
+            .replace(RE_FRAG_TOKEN, "#token=***")
+            .replace(RE_BANNER_TOKEN, "Token: ***")
+    }
+
+    private fun tailOfLog(fromOffset: Long): String? {
         return try {
             val f = File(filesDir, "logs/kimi.log")
             if (!f.isFile) return null
             val bytes = f.readBytes()
-            val off = if (bytes.size > 2048) bytes.size - 2048 else 0
-            String(bytes, off, bytes.size - off)
+            var off = fromOffset
+            // 日志被 2MB 截断重置过的话偏移会越界，退回整份尾巴
+            if (off < 0 || off > bytes.size) off = 0
+            if (bytes.size - off > 2048L) off = bytes.size - 2048L
+            redact(String(bytes, off.toInt(), (bytes.size - off).toInt()))
                 .lines().map { it.trim() }.filter { it.isNotEmpty() }
                 .takeLast(3).joinToString("\n").take(500).ifBlank { null }
         } catch (_: Throwable) { null }
@@ -206,7 +262,7 @@ class KimiService : Service() {
 
     private fun giveUpIfHopeless(crashes: Int): Boolean {
         if (crashes < MAX_CRASHES) return false
-        KimiState.status = "引擎连续崩溃 $crashes 次，已停止自动重启。请重新打开 App；仍不行则在系统设置里清除本应用数据（会退出登录）后重试"
+        KimiState.status = "引擎在 10 分钟内崩溃 $crashes 次，已停止自动重启。请重新打开 App；仍不行则在系统设置里清除本应用数据（会退出登录）后重试"
         updateNotification("引擎反复崩溃，已停止。请重新打开 App")
         stopSelf()
         return true
@@ -243,6 +299,16 @@ class KimiService : Service() {
         File(prefix, "tmp").mkdirs()
         File(filesDir, "logs").mkdirs()
 
+        // 记录本次启动的日志起点（自愈判定只看新增输出），并预载 token 供日志脱敏
+        val logFile = File(filesDir, "logs/kimi.log")
+        logStartOffset = if (logFile.isFile) logFile.length() else 0L
+        if (currentToken == null) {
+            currentToken = try {
+                File(filesDir, "home/.kimi-code/server.token").readText().trim().ifEmpty { null }
+            } catch (_: Throwable) { null }
+        }
+        bannerPort = null
+
         val pb = ProcessBuilder(
             "${prefix.path}/bin/node",
             "${prefix.path}/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
@@ -267,13 +333,16 @@ class KimiService : Service() {
         pb.redirectErrorStream(true)
 
         val p = pb.start()
-        val logFile = File(filesDir, "logs/kimi.log")
+        val bannerRe = Regex("""Local:\s+http://127\.0\.0\.1:(\d+)""")
         Thread {
             try {
                 FileWriter(logFile, true).use { w ->
                     p.inputStream.bufferedReader().forEachLine { line ->
+                        // banner 里的绑定端口来自进程自己的 stdout，同机抢端口者无法伪造这一条
+                        val m = bannerRe.find(line)
+                        if (m != null) bannerPort = m.groupValues[1].toIntOrNull()
                         if (logFile.length() > 2 * 1024 * 1024) logFile.writeText("")
-                        w.write(line + "\n")
+                        w.write(redact(line) + "\n")
                         w.flush()
                     }
                 }
@@ -282,12 +351,18 @@ class KimiService : Service() {
         return p
     }
 
-    /** 不能只验 TCP connect——端口可能被别的进程占用；要求 HTTP 指纹确认是本引擎 */
+    /**
+     * 两道验证缺一不可：
+     * 1) healthz HTTP 指纹（不能只验 TCP connect——端口可能被别的进程占用）
+     * 2) 引擎 banner 自报端口与探测端口一致——healthz 无需认证、谁都能伪造应答，
+     *    但 banner 来自我们子进程的 stdout，同机恶意 App 抢端口后写不进这条日志。
+     *    注意：绝不在探测请求里带 token（伪造者应答 200 不需要知道 token，带了反而白送）。
+     */
     private fun waitForServer(p: Process, port: Int, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (!p.isAlive) return false
-            if (probeHealthz(port)) return true
+            if (bannerPort == port && probeHealthz(port)) return true
             Thread.sleep(300)
         }
         return false
@@ -299,7 +374,8 @@ class KimiService : Service() {
                 .openConnection() as HttpURLConnection
             conn.connectTimeout = 500
             conn.readTimeout = 500
-            conn.inputStream.bufferedReader().use { it.readText() }.contains("\"ok\"")
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            body.contains("\"code\":0") && body.contains("\"ok\":true")
         } catch (_: Throwable) {
             false
         }

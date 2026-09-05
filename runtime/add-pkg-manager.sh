@@ -20,7 +20,7 @@ echo "    Packages 大小: $(wc -c < pkgadd/Packages) bytes"
 
 # ── 2-9. Python 做重活 ───────────────────────────────────────────
 exec python3 - pkgadd staging-final/usr <<'PYEOF'
-import sys, os, re, subprocess, shutil, struct
+import sys, os, re, subprocess, shutil, struct, hashlib
 from pathlib import Path
 
 PKGADD   = sys.argv[1]          # runtime/pkgadd
@@ -148,14 +148,39 @@ debs_dir = os.path.join(PKGADD, "debs")
 tree_dir = os.path.join(PKGADD, "tree")
 usr_dir  = os.path.join(PKGADD, "usr")
 
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+def download_deb(pkg, info, deb_path, url):
+    """下载并按 Packages 索引里的 SHA256 校验；缓存文件同样要过校验。"""
+    expected = info.get('SHA256', '').strip().lower()
+    for attempt in (1, 2):
+        if not os.path.exists(deb_path):
+            print(f"  下载 {pkg} {info['Version']} ...")
+            subprocess.run(["curl", "-fSL", "-o", deb_path, url], check=True, capture_output=True)
+        if not expected:
+            print(f"  !! {pkg}: 索引缺 SHA256，无法校验，中止")
+            sys.exit(1)
+        actual = sha256_of(deb_path)
+        if actual == expected:
+            return
+        print(f"  !! {pkg}: SHA256 不匹配 (期望 {expected}, 实际 {actual})")
+        os.remove(deb_path)
+        if attempt == 2:
+            print(f"  !! {pkg}: 重下后仍不匹配，中止")
+            sys.exit(1)
+        print(f"  重新下载 {pkg} ...")
+
 for pkg in sorted(new_pkgs):
     info = all_pkgs[pkg]
     fn = info['Filename']
     url = "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/" + fn
     deb_path = os.path.join(debs_dir, os.path.basename(fn))
-    if not os.path.exists(deb_path):
-        print(f"  下载 {pkg} {info['Version']} ...")
-        subprocess.run(["curl", "-fSL", "-o", deb_path, url], check=True, capture_output=True)
+    download_deb(pkg, info, deb_path, url)
 
     # ar x
     extract_subdir = os.path.join(tree_dir, pkg)
@@ -330,6 +355,7 @@ else:
 # ── 6. 补空目录 ──────────────────────────────────────────────────
 print("\n[6] 创建 dpkg/apt 目录结构 ...")
 dirs_to_create = [
+    "tmp",
     "var/lib/dpkg/info",
     "var/lib/dpkg/triggers",
     "var/lib/dpkg/updates",
@@ -360,6 +386,8 @@ for pkg in sorted(all_installed):
     lines = []
     lines.append(f"Package: {pkg}")
     lines.append("Status: install ok installed")
+    # Termux 索引没有 Maintainer 字段，补占位避免 dpkg 每次解析都刷警告
+    lines.append(f"Maintainer: {info.get('Maintainer') or '@termux'}")
     if info.get('Priority'):
         lines.append(f"Priority: {info['Priority']}")
     if info.get('Essential'):

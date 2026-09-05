@@ -19,28 +19,44 @@ import java.util.zip.GZIPInputStream
 object RuntimeInstaller {
 
     // 每次 runtime.pkg 内容变化时 +1，触发已装机型的重解压（不动 home/，不影响登录态）
-    private const val RUNTIME_VERSION = 3
+    private const val RUNTIME_VERSION = 6
 
     // 解压后约 350MB（usr/ ~233MB + 缓存增长余量），低于这个值宁可报错也别解一半
     private const val MIN_FREE_BYTES = 700L * 1024 * 1024
 
     @Synchronized
     fun ensureInstalled(ctx: Context) {
-        val marker = File(ctx.filesDir, "usr/.rt_version")
+        val usr = File(ctx.filesDir, "usr")
+        val marker = File(usr, ".rt_version")
         val installed = try {
             if (marker.exists()) marker.readText().trim().toIntOrNull() else null
         } catch (_: Exception) { null }
         if (installed == RUNTIME_VERSION) return
+
+        if (installed != null && usr.isDirectory) {
+            // 版本升级 = 清空后全新解压。覆盖式解压会在 目录↔文件 翻转、agent 留下的外部
+            // 符号链接上抛异常（每次启动同一位置炸死），也会和 agent 自升级的 npm 树
+            // 混出「缝合怪」引擎（新版残留文件 + 打包旧文件）
+            KimiState.status = "运行环境升级：正在清理旧环境…"
+            usr.deleteRecursively()
+        }
 
         val free = StatFs(ctx.filesDir.absolutePath).availableBytes
         if (free < MIN_FREE_BYTES) {
             throw IOException("存储空间不足：需要约 ${MIN_FREE_BYTES / 1024 / 1024}MB，当前可用 ${free / 1024 / 1024}MB")
         }
 
-        KimiState.status = "首次运行：正在部署运行环境…"
-        extractTarGz(ctx, "runtime.pkg", ctx.filesDir)
-        marker.parentFile?.mkdirs()
-        marker.writeText("$RUNTIME_VERSION\n")
+        KimiState.status = if (installed == null) "首次运行：正在部署运行环境…" else "运行环境升级：正在部署新环境…"
+        try {
+            extractTarGz(ctx, "runtime.pkg", ctx.filesDir)
+            marker.parentFile?.mkdirs()
+            marker.writeText("$RUNTIME_VERSION\n")
+        } catch (t: Throwable) {
+            // 解一半的树宁可整个删掉：下次启动从干净状态重来，
+            // 避免同一个坏条目在每次启动时重复炸死（只能清数据的死局）
+            usr.deleteRecursively()
+            throw t
+        }
     }
 
     /** 初始配置只在缺失时写入，避免升级覆盖设备上已登录的状态 */
@@ -52,8 +68,9 @@ object RuntimeInstaller {
             ensureAgentsMd(ctx)
             return
         }
-        // 兼容旧版安装：已有配置说明初始化过，只补 marker，绝不重解压覆盖登录态
-        if (File(home, ".kimi-code/config.toml").exists()) {
+        // 兼容旧版/异常状态：.kimi-code 目录在就说明初始化过，只补 marker 和缺失的注入文件，
+        // 绝不整包覆盖（agent 可能删过个别文件如 config.toml，覆盖会把用户定制重置回出厂）
+        if (File(home, ".kimi-code").isDirectory) {
             home.mkdirs()
             ready.writeText("1\n")
             ensureAgentsMd(ctx)

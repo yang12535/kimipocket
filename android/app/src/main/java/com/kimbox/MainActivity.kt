@@ -61,8 +61,12 @@ class MainActivity : Activity() {
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val u = request.url
-                // loopback 站内消化；外部链接（如 OAuth 授权页可选择在系统浏览器打开）交给浏览器
-                return if (u.host == "127.0.0.1" || u.host == "localhost") {
+                // 只有「当前引擎端口」的 loopback 地址留在站内；
+                // 其他 loopback 端口（如同机恶意 App 开的仿冒页面）与外部链接一律交系统浏览器
+                val enginePort = KimiState.port
+                val isEngine = enginePort != null &&
+                    (u.host == "127.0.0.1" || u.host == "localhost") && u.port == enginePort
+                return if (isEngine) {
                     false
                 } else {
                     try { startActivity(Intent(Intent.ACTION_VIEW, u)) } catch (_: Exception) {}
@@ -127,6 +131,9 @@ class MainActivity : Activity() {
             val url = KimiState.url
             if (url != loadedUrl) {
                 if (url == null) {
+                    // 引擎重启后新 URL 往往与旧的逐字符相同（同端口同 token）：
+                    // 不清掉 loadedUrl 的话既不重载页面也不撤遮罩，界面永久卡在加载页
+                    loadedUrl = null
                     overlay.visibility = View.VISIBLE
                 } else {
                     loadedUrl = url
