@@ -10,6 +10,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ValueCallback
@@ -40,9 +42,10 @@ class MainActivity : Activity() {
     companion object {
         private const val FILE_CHOOSER_REQ = 42
         private const val EXPORT_PICKER_REQ = 43
+        private const val MENU_SETTINGS = 1
     }
 
-    /** agent 把要导出的文件放这里，用户通过导出按钮走 SAF 保存到公共位置 */
+    /** agent 把要导出的文件放这里，用户走 设置菜单 → 导出文件（SAF）保存到公共位置 */
     private fun exportsDir(): File = File(filesDir, "home/exports")
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -132,30 +135,37 @@ class MainActivity : Activity() {
         root.addView(overlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // 右下角浮动导出按钮：点它走 SAF 把 ~/exports/ 里的文件存到公共位置
-        val exportBtn = TextView(this).apply {
-            text = "\uD83D\uDCE4" // 📤
-            contentDescription = "导出文件"
-            textSize = 22f
-            gravity = Gravity.CENTER
-            setBackgroundColor(0xCC333333.toInt())
-            setTextColor(Color.WHITE)
-            setOnClickListener { showExportDialog() }
-            setOnLongClickListener {
-                Toast.makeText(this@MainActivity, "导出文件", Toast.LENGTH_SHORT).show()
-                true
-            }
-        }
-        val btnSize = (56 * resources.displayMetrics.density).toInt()
-        val btnMargin = (16 * resources.displayMetrics.density).toInt()
-        root.addView(exportBtn, FrameLayout.LayoutParams(btnSize, btnSize).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            setMargins(0, 0, btnMargin, btnMargin)
-        })
-
         setContentView(root)
 
         handler.post(poller)
+    }
+
+    // 右上角设置入口：二级菜单放「导出文件」等低频操作，不再占用主界面
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, MENU_SETTINGS, 0, "⚙️ 设置")
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == MENU_SETTINGS) {
+            showSettingsDialog()
+            return true
+        }
+        return super.onOptionsItemSelected(item)
+    }
+
+    private fun showSettingsDialog() {
+        val items = arrayOf("导出文件")
+        AlertDialog.Builder(this)
+            .setTitle("设置")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> showExportDialog()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private val poller = object : Runnable {
