@@ -82,7 +82,7 @@ am start -a android.intent.action.VIEW \
 
 1. 把要导出的文件放到 `~/exports/`（即 `/data/data/com.kimbox/files/home/exports/`）。
    如果目录不存在就 `mkdir -p ~/exports`。
-2. 告诉用户：点 App 右下角的 📤 按钮 → 选择文件 → 选保存位置。
+2. 告诉用户：点 App 右上角标题栏的 ⚙️ 设置 → 导出文件 → 选择文件 → 选保存位置。
 
 这个按钮走的是系统文件选择器（SAF），系统会处理权限和写入，不需要应用有存储权限。
 

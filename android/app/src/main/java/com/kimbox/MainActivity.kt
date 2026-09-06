@@ -10,6 +10,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ValueCallback
@@ -22,7 +24,10 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 class MainActivity : Activity() {
 
@@ -40,9 +45,10 @@ class MainActivity : Activity() {
     companion object {
         private const val FILE_CHOOSER_REQ = 42
         private const val EXPORT_PICKER_REQ = 43
+        private const val MENU_SETTINGS = 1
     }
 
-    /** agent 把要导出的文件放这里，用户通过导出按钮走 SAF 保存到公共位置 */
+    /** agent 把要导出的文件放这里，用户走 设置菜单 → 导出文件（SAF）保存到公共位置 */
     private fun exportsDir(): File = File(filesDir, "home/exports")
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -132,30 +138,184 @@ class MainActivity : Activity() {
         root.addView(overlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // 右下角浮动导出按钮：点它走 SAF 把 ~/exports/ 里的文件存到公共位置
-        val exportBtn = TextView(this).apply {
-            text = "\uD83D\uDCE4" // 📤
-            contentDescription = "导出文件"
-            textSize = 22f
-            gravity = Gravity.CENTER
-            setBackgroundColor(0xCC333333.toInt())
-            setTextColor(Color.WHITE)
-            setOnClickListener { showExportDialog() }
-            setOnLongClickListener {
-                Toast.makeText(this@MainActivity, "导出文件", Toast.LENGTH_SHORT).show()
-                true
-            }
-        }
-        val btnSize = (56 * resources.displayMetrics.density).toInt()
-        val btnMargin = (16 * resources.displayMetrics.density).toInt()
-        root.addView(exportBtn, FrameLayout.LayoutParams(btnSize, btnSize).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            setMargins(0, 0, btnMargin, btnMargin)
-        })
-
         setContentView(root)
 
+        loadCachedRelease()
+        refreshDot()
+        checkForUpdates(manual = false)
+
         handler.post(poller)
+    }
+
+    // 右上角设置入口：二级菜单放「检查更新」「导出文件」等低频操作，不再占用主界面
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        // 有新版且未点看过时齿轮带红点
+        val dot = if (updateUnseen) " 🔴" else ""
+        menu.add(0, MENU_SETTINGS, 0, "⚙️ 设置$dot")
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == MENU_SETTINGS) {
+            showSettingsDialog()
+            return true
+        }
+        return super.onOptionsItemSelected(item)
+    }
+
+    private fun showSettingsDialog() {
+        val dot = if (updateUnseen) " 🔴" else ""
+        val items = arrayOf("检查更新$dot", "导出文件")
+        AlertDialog.Builder(this)
+            .setTitle("设置")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> showUpdateDialog()
+                    1 -> showExportDialog()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    // ── 检查更新（GitHub Releases）────────────────────────────
+    // release 简介约定：开头可带 [标签] 分类（如 [apk底层更新-只能从更新升级]），
+    // 这里解析出来原样展示；红点缓存进 SharedPreferences，下次启动立即显示
+    private data class ReleaseInfo(val version: String, val url: String, val notes: String, val tags: List<String>)
+
+    private var latestRelease: ReleaseInfo? = null
+    private var updateAvailable = false
+    private var updateUnseen = false
+    private var checkingUpdate = false
+
+    // 不用 BuildConfig（会多出 Java 编译任务踩 AGP 的 JDK 坑），PackageManager 直取
+    @Suppress("DEPRECATION")
+    private val appVersion: String
+        get() = packageManager.getPackageInfo(packageName, 0).versionName ?: "0.0.0"
+
+    /** 有新版且用户还没点开看过：已看过的版本不再亮红点，直到出现更新的 release */
+    private fun refreshDot() {
+        updateUnseen = updateAvailable &&
+            latestRelease?.version != getPreferences(MODE_PRIVATE).getString("seenVersion", null)
+        invalidateOptionsMenu()
+    }
+
+    private fun markUpdateSeen() {
+        val v = latestRelease?.version ?: return
+        getPreferences(MODE_PRIVATE).edit().putString("seenVersion", v).apply()
+        refreshDot()
+    }
+
+    private fun loadCachedRelease() {
+        val p = getPreferences(MODE_PRIVATE)
+        val v = p.getString("latestVersion", null) ?: return
+        latestRelease = ReleaseInfo(
+            v,
+            p.getString("latestUrl", "") ?: "",
+            p.getString("latestNotes", "") ?: "",
+            p.getString("latestTags", "")?.split("|")?.filter { it.isNotEmpty() } ?: emptyList())
+        updateAvailable = isNewerVersion(v, appVersion)
+    }
+
+    private fun checkForUpdates(manual: Boolean) {
+        if (checkingUpdate) return
+        checkingUpdate = true
+        if (manual) Toast.makeText(this, "正在检查更新…", Toast.LENGTH_SHORT).show()
+        Thread {
+            var info: ReleaseInfo? = null
+            var error: String? = null
+            try {
+                val conn = URL("https://api.github.com/repos/yang12535/kimipocket/releases/latest")
+                    .openConnection() as HttpURLConnection
+                conn.connectTimeout = 8000
+                conn.readTimeout = 8000
+                conn.setRequestProperty("Accept", "application/vnd.github+json")
+                conn.setRequestProperty("User-Agent", "kimipocket/" + appVersion)
+                if (conn.responseCode != 200) throw Exception("HTTP " + conn.responseCode)
+                val json = JSONObject(conn.inputStream.bufferedReader().readText())
+                val body = json.optString("body", "")
+                val tags = Regex("\\[([^\\]]+)\\]").findAll(body.take(300))
+                    .map { it.groupValues[1] }.toList()
+                info = ReleaseInfo(
+                    json.getString("tag_name").removePrefix("v"),
+                    json.getString("html_url"),
+                    body, tags)
+            } catch (t: Throwable) {
+                error = t.message
+            }
+            val manualFlag = manual
+            runOnUiThread {
+                checkingUpdate = false
+                if (info != null) {
+                    latestRelease = info
+                    updateAvailable = isNewerVersion(info.version, appVersion)
+                    getPreferences(MODE_PRIVATE).edit()
+                        .putString("latestVersion", info.version)
+                        .putString("latestUrl", info.url)
+                        .putString("latestNotes", info.notes)
+                        .putString("latestTags", info.tags.joinToString("|"))
+                        .apply()
+                    refreshDot()
+                    if (manualFlag) showUpdateDialog()
+                } else if (manualFlag) {
+                    Toast.makeText(this, "检查更新失败：$error", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun isNewerVersion(latest: String, current: String): Boolean {
+        fun parts(v: String) = v.removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
+        val a = parts(latest); val b = parts(current)
+        for (i in 0 until maxOf(a.size, b.size)) {
+            val x = a.getOrElse(i) { 0 }; val y = b.getOrElse(i) { 0 }
+            if (x != y) return x > y
+        }
+        return false
+    }
+
+    private fun showUpdateDialog() {
+        val info = latestRelease
+        if (info == null) {
+            // 还没有任何检查结果：现场拉一次，拉回来自动再弹
+            checkForUpdates(manual = true)
+            return
+        }
+        val hasUpdate = isNewerVersion(info.version, appVersion)
+        val sb = StringBuilder()
+        sb.append("当前版本：").append(appVersion).append('\n')
+        sb.append("最新版本：").append(info.version)
+        if (hasUpdate) sb.append("  🔴 有更新")
+        sb.append('\n')
+        if (info.tags.isNotEmpty()) {
+            sb.append('\n')
+            for (t in info.tags) sb.append('[').append(t).append(']')
+            sb.append('\n')
+        }
+        // 简介太长只给前 800 字，全文走「前往下载」
+        val notes = info.notes.trim()
+        if (notes.isNotEmpty()) {
+            sb.append('\n').append(if (notes.length > 800) notes.take(800) + "…" else notes)
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(if (hasUpdate) "发现新版本" else "已是最新")
+            .setMessage(sb.toString())
+            .setNegativeButton("关闭", null)
+        if (hasUpdate) {
+            markUpdateSeen()
+            dlg.setPositiveButton("前往下载") { _, _ ->
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.url)))
+                } catch (e: ActivityNotFoundException) {
+                    Toast.makeText(this, "打不开浏览器，请手动访问：\n" + info.url, Toast.LENGTH_LONG).show()
+                }
+            }
+        } else {
+            // 没更新时也给个手动刷新入口，防止缓存太旧
+            dlg.setPositiveButton("重新检查") { _, _ -> checkForUpdates(manual = true) }
+        }
+        dlg.show()
     }
 
     private val poller = object : Runnable {

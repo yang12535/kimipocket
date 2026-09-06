@@ -146,6 +146,18 @@ EOF
   拉取 `Android/data/com.kimbox/files/workspace`，或让 Kimi 先复制到
   `Download/下载` 目录）。新谱系内（v0.2.0 起）覆盖安装一切保留。
 
+## 发版约定
+
+- 版本提升：`versionCode` +1、`versionName` 跟上；`runtime.pkg` 内容变了就把
+  `RUNTIME_VERSION` +1（触发已装机重解压，home 保留）；种子 home 内容变了把
+  `SEED_VERSION` +1（老装机迁移新种子，用户改过的文件不覆盖）。
+- **Release 简介标签**：简介开头的 `[标签]` 会被 App 的「设置 → 检查更新」解析
+  展示（启动时自动拉取，有新版时齿轮亮红点，用户点开看过即消）。常用标签：
+  `[apk底层更新-只能从更新升级]`（必须装新 APK）、`[固定升级版本-可自行升级]`、
+  `[agents.md更新]`。标签只影响展示分类，不阻断任何流程。
+- Release 资产：`kimipocket-X.Y.Z.apk` + `kimipocket.apk`（稳定名副本）+
+  `runtime-X.Y.Z.pkg` + `kimihome-X.Y.Z.pkg`，简介附 SHA-256。
+
 ## 已知坑 / TODO
 
 - 工作目录在 /sdcard（FUSE，noexec、不支持符号链接/chmod）：解释器方式运行
