@@ -218,23 +218,44 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /**
+     * 存储权限请求状态机（三态，由 SharedPreferences "storageRequested" + shouldShowRequestPermissionRationale 联合判定）：
+     *
+     * ┌─────────────────────────────────────────────────────────────────────────────────────┐
+     * │ 状态          │ storageRequested │ shouldShowRationale │ 行为                       │
+     * ├─────────────────────────────────────────────────────────────────────────────────────┤
+     * │ A. 首次未问过 │ false             │ false（系统首次）    │ 调 requestPermissions，    │
+     * │               │                   │                      │ 并置标记 true              │
+     * │ B. 问过被拒    │ true              │ true                 │ 再次 requestPermissions   │
+     * │ （可重试）     │                   │ （用户未勾选不再询问）│ （系统仍弹窗）             │
+     * │ C. 永久拒绝    │ true              │ false                │ 跳系统应用详情页，让用户  │
+     * │ （不再询问）    │                   │                      │ 手动开启                  │
+     * └─────────────────────────────────────────────────────────────────────────────────────┘
+     *
+     * 关键：storageRequested 标记只从 false → true，被拒时绝不清回 false。
+     * 否则永久拒绝后会死循环：每次点击都重新走 requestPermissions（系统静默拒绝、无弹窗），
+     * 永远到不了跳系统设置的分支。
+     */
     private fun requestStoragePermission() {
         if (isStoragePermissionGranted()) return
-        // 永久拒绝（用户勾选了"不再询问"）：跳系统应用详情页，让用户手动开启
-        if (!shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
-            // 首次请求也走这个分支（shouldShowRequestPermissionRationale 首次返回 false）：
-            // 先直接 requestPermissions 尝试一次；若被拒绝，下次再进这里就是真永久拒绝
-            // → 跳系统设置
-            val prefs = getPreferences(MODE_PRIVATE)
-            if (!prefs.getBoolean("storageRequested", false)) {
-                prefs.edit().putBoolean("storageRequested", true).apply()
-                requestPermissions(
-                    arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                            Manifest.permission.READ_EXTERNAL_STORAGE),
-                    STORAGE_PERMISSION_REQ
-                )
-                return
-            }
+        val prefs = getPreferences(MODE_PRIVATE)
+        val askedBefore = prefs.getBoolean("storageRequested", false)
+        val canShowDialog = shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+
+        if (!askedBefore && !canShowDialog) {
+            // 状态 A：首次未问过 — shouldShowRequestPermissionRationale 首次固定返回 false，
+            // 必须调一次 requestPermissions 让系统弹窗；同时落盘标记，后续不再走此分支
+            prefs.edit().putBoolean("storageRequested", true).apply()
+            requestPermissions(
+                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        Manifest.permission.READ_EXTERNAL_STORAGE),
+                STORAGE_PERMISSION_REQ
+            )
+            return
+        }
+        if (askedBefore && !canShowDialog) {
+            // 状态 C：永久拒绝 — 用户勾选了「不再询问」或系统不再弹窗，
+            // 再 requestPermissions 只会被静默拒绝，直接跳系统应用详情页
             try {
                 startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                     data = Uri.parse("package:$packageName")
@@ -245,6 +266,8 @@ class MainActivity : Activity() {
             }
             return
         }
+        // 状态 B：问过被拒但可重试 — shouldShowRequestPermissionRationale=true，
+        // 系统仍会弹授权弹窗，直接 requestPermissions
         requestPermissions(
             arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE,
                     Manifest.permission.READ_EXTERNAL_STORAGE),
@@ -258,8 +281,8 @@ class MainActivity : Activity() {
                 Toast.makeText(this, "已授权，Kimi 现在可以访问公共目录", Toast.LENGTH_LONG).show()
             } else {
                 Toast.makeText(this, "权限被拒绝，可稍后在设置中重新开启", Toast.LENGTH_LONG).show()
-                // 被拒绝：重置标志以便下次进来还能弹一次 requestPermissions
-                getPreferences(MODE_PRIVATE).edit().putBoolean("storageRequested", false).apply()
+                // 注意：不清 storageRequested 标记。标记只记录「是否问过」，用于区分首次与永久拒绝。
+                // 清回 false 会导致永久拒绝后死循环（每次点击都重走 requestPermissions 而非跳系统设置）
             }
             // 刷新设置菜单显示最新状态
             invalidateOptionsMenu()
