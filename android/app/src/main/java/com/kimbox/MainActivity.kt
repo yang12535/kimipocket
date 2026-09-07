@@ -279,12 +279,18 @@ class MainActivity : Activity() {
         if (requestCode == STORAGE_PERMISSION_REQ) {
             if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
                 Toast.makeText(this, "已授权，Kimi 现在可以访问公共目录", Toast.LENGTH_LONG).show()
+            } else if (grantResults.isEmpty()) {
+                // 空数组 = 用户取消/交互被打断（Android 官方契约）。
+                // 系统尚未记下拒绝、rationale 仍为 false，恢复 storageRequested 标记
+                // 允许下次正常弹授权窗而不是直接跳系统设置页。
+                getPreferences(MODE_PRIVATE).edit().putBoolean("storageRequested", false).apply()
+                Toast.makeText(this, "授权已取消，可稍后在设置中重新开启", Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "权限被拒绝，可稍后在设置中重新开启", Toast.LENGTH_LONG).show()
-                // 注意：不清 storageRequested 标记。标记只记录「是否问过」，用于区分首次与永久拒绝。
+                // 真正的拒绝（数组非空且全 denied）：保留 storageRequested 标记。
+                // 标记只记录「是否问过」，用于区分首次与永久拒绝。
                 // 清回 false 会导致永久拒绝后死循环（每次点击都重走 requestPermissions 而非跳系统设置）
+                Toast.makeText(this, "权限被拒绝，可稍后在设置中重新开启", Toast.LENGTH_LONG).show()
             }
-            // 刷新设置菜单显示最新状态
             invalidateOptionsMenu()
         } else {
             super.onRequestPermissionsResult(requestCode, permissions, grantResults)
