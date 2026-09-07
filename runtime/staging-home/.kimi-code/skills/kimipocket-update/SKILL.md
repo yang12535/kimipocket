@@ -5,7 +5,7 @@ description: |
   升级引擎（kimi-code 本体）、安装系统包（pkg/apt）、升级 APK，或说「更新」「升级」
   「update」「upgrade」时使用。也用于更新出故障时的自救指引。
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
 ---
 
 # 口袋Kimi：项目信息与更新指南
@@ -86,8 +86,11 @@ sha256sum /sdcard/Download/kimipocket.apk
 **下载后必须校验 SHA-256**：对比 `sha256sum` 输出与 release notes 公布的校验值。
 不一致说明下载损坏或被篡改，**禁止引导用户安装**。
 
-浏览器下载同理：装之前告诉用户在文件管理器里长按 APK → 详情 → 看文件大小和修改时间，
-与 release notes 公布的数值对比。
+浏览器下载的文件也在 `/sdcard/Download/`：**已开启存储权限时**由 agent 自己跑
+`sha256sum /sdcard/Download/kimipocket*.apk` 并与 release notes 的校验值对比，一致才引导安装。
+**未开启存储权限时**agent 读不到浏览器下载的文件：让用户在文件管理器里长按 APK → 详情，
+核对文件大小与 release notes 公布值是否一致——注意这只是防下载截断的粗检，证明不了完整性；
+要可靠校验，按「文件导出」章节的指引临时开启存储权限后由 agent 跑 sha256sum。
 
 装完打开 App：若新版含运行时更新，首次打开会自动重装运行环境（约 20 秒，界面有
 进度提示）；没有运行时更新则直接可用。

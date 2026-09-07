@@ -49,17 +49,19 @@ object RuntimeInstaller {
             // v0.2.3
             "34e04579e56ee956eeca44ec6c02b1347e6972fdce6dff2cc5a1bff85840aa12",
             // v0.2.4
-            "8fe6820be30e5a6affe37aa568825ee7a7d65850427743f5dc319794168ccc66",
+            "ca8f690b4b65003bfa54a89125b6136825ac1a2059d1f23e3cda806639fbbcde",
         ),
     )
 
     // 解压后约 350MB（usr/ ~233MB + 缓存增长余量），低于这个值宁可报错也别解一半
     private const val MIN_FREE_BYTES = 700L * 1024 * 1024
 
-    /** 运行时关键文件：marker 正确但这些文件缺失/不可执行时，视为运行时损坏需重解压 */
+    /** 运行时关键文件：marker 正确但这些文件损坏时，视为运行时损坏需重解压。
+     *  second = 是否要求可执行。libtermux-exec.so 作为 LD_PRELOAD 共享库只需存在且可读，
+     *  打包不保证 +x 位，要求可执行会把完好运行时误判成损坏（误触发重解压）。 */
     private val RUNTIME_CRITICAL_FILES = listOf(
-        "usr/bin/node",
-        "usr/lib/libtermux-exec.so",
+        "usr/bin/node" to true,
+        "usr/lib/libtermux-exec.so" to false,
     )
 
     @Synchronized
@@ -70,15 +72,18 @@ object RuntimeInstaller {
             if (marker.exists()) marker.readText().trim().toIntOrNull() else null
         } catch (_: Exception) { null }
         if (installed == RUNTIME_VERSION) {
-            // Pre-flight：即使 marker 正确，也验证关键可执行文件存在且可执行。
-            // 缺失/不可执行说明运行时被损坏（误删、文件系统错误等），需要重解压。
+            // Pre-flight：即使 marker 正确，也验证关键文件完好。
+            // isFile 跟随符号链接（stat），允许指向普通文件的符号链接；同时排除
+            // 「同名目录」——损坏/中断的包操作可能留下 usr/bin/node 目录，它能过
+            // exists()+canExecute()，但 ProcessBuilder 拿到目录会在日志建立之前失败，
+            // 基于日志的自愈永不触发。缺失/损坏说明运行时被损坏（误删、文件系统错误等），需要重解压。
             // 有界保护：由调用方（KimiService）控制同一启动内最多触发一次，避免死循环。
-            val missing = RUNTIME_CRITICAL_FILES.firstOrNull { path ->
+            val missing = RUNTIME_CRITICAL_FILES.firstOrNull { (path, needExec) ->
                 val f = File(ctx.filesDir, path)
-                !f.exists() || !f.canExecute()
+                !f.isFile || !f.canRead() || (needExec && !f.canExecute())
             }
             if (missing == null) return
-            android.util.Log.w("kimbox", "runtime pre-flight failed: $missing missing or not executable, re-extracting")
+            android.util.Log.w("kimbox", "runtime pre-flight failed: ${missing.first} missing/unreadable${if (missing.second) "/not executable" else ""}, re-extracting")
         }
 
         // 只要 usr/ 还在就得先清：版本升级（marker 在）或上次清理失败的半截树
@@ -173,8 +178,14 @@ object RuntimeInstaller {
                 android.util.Log.i("kimbox", "seeded home/$name (missing)")
             } else if (needsUpdate) {
                 val currentHash = sha256hex(target.readBytes())
-                val knownHashes = KNOWN_SEED_HASHES[name] ?: emptySet()
-                if (currentHash in knownHashes) {
+                val knownHashes = KNOWN_SEED_HASHES[name]
+                if (knownHashes == null) {
+                    // 表里没有这个 key = 开发者新增种子文件时忘了登记哈希表。
+                    // 按「来源不明」保留不覆盖，但必须打 warning 暴露配置缺陷，
+                    // 否则会被误当成用户自定义而难以排查。
+                    android.util.Log.w("kimbox", "KNOWN_SEED_HASHES has no entry for $name; treating as user-customized (did you forget to register official hashes?)")
+                }
+                if (currentHash in (knownHashes ?: emptySet())) {
                     // 磁盘文件是已知官方种子 → 安全覆盖
                     target.writeBytes(data)
                     hashFile.writeText(sha256hex(data))
