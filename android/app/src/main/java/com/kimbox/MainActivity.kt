@@ -169,7 +169,8 @@ class MainActivity : Activity() {
     }
 
     private fun isStoragePermissionGranted(): Boolean =
-        checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+        checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
 
     private fun showSettingsDialog() {
         val dot = if (updateUnseen) " 🔴" else ""
@@ -236,7 +237,7 @@ class MainActivity : Activity() {
             }
             try {
                 startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.parse("package:com.kimbox")
+                    data = Uri.parse("package:$packageName")
                 })
                 Toast.makeText(this, "请在应用权限中开启「存储」或「文件和媒体」权限", Toast.LENGTH_LONG).show()
             } catch (e: ActivityNotFoundException) {
