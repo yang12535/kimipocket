@@ -44,6 +44,8 @@ object RuntimeInstaller {
             "6c1fd84ec95212fa1d8e4d6bc4b26238c605f3ad220762fddd4758279f259385",
             // v0.2.3
             "f794b45916f3ea413ffb1b26d7ec6c88ebb712391fd13f192eaa79a3c7588e0f",
+            // v0.2.4
+            "8fe6820be30e5a6affe37aa568825ee7a7d65850427743f5dc319794168ccc66",
         ),
     )
 
