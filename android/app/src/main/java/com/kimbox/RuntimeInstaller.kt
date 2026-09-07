@@ -34,16 +34,20 @@ object RuntimeInstaller {
      */
     private val KNOWN_SEED_HASHES: Map<String, Set<String>> = mapOf(
         ".kimi-code/AGENTS.md" to setOf(
-            // v0.2.1 / v0.2.2 / v0.2.3（三版内容相同）
-            "655e82629bd45b43a30749f4bc104f97fc93e67cf02288d79c796120d5bfedd5",
+            // v0.1.1（v0.1.0 尚无此文件）
+            "72d892a1d77a46850404b086e39310f7a8e45bf9d484d085073616a9039a40a7",
+            // v0.2.0 / v0.2.1 / v0.2.2 / v0.2.3（四版内容相同）
+            "211e9e4317c4b5137883415199ecc6e265b7fcefedaa2913dc9ddca3d7fb2a97",
         ),
         ".kimi-code/skills/kimipocket-update/SKILL.md" to setOf(
+            // v0.2.0
+            "9aea19e0503bbc6c0d5a5fda7b59f6de60908e1b1c5be798e0ac23be30a0416a",
             // v0.2.1
-            "48d1bb1894f9dae63c06efac364da688a36abd4f8c38a244136139e29bf6279d",
+            "384fc5775e2637d73b23a877fd396ead5b3971468afca3d72c3f7e2cdb386e5a",
             // v0.2.2
-            "6c1fd84ec95212fa1d8e4d6bc4b26238c605f3ad220762fddd4758279f259385",
+            "eceb4163251f46a35d3a410f1bfac2b2316c9427f883cadcf7be0f53001c470d",
             // v0.2.3
-            "f794b45916f3ea413ffb1b26d7ec6c88ebb712391fd13f192eaa79a3c7588e0f",
+            "34e04579e56ee956eeca44ec6c02b1347e6972fdce6dff2cc5a1bff85840aa12",
             // v0.2.4
             "8fe6820be30e5a6affe37aa568825ee7a7d65850427743f5dc319794168ccc66",
         ),
