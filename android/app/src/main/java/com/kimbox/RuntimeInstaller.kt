@@ -126,6 +126,9 @@ object RuntimeInstaller {
         KimiState.status = "正在写入初始配置…"
         extractTarGz(ctx, "kimihome.pkg", home)
         ready.writeText("1\n")
+        // 首次解压后立即登记种子哈希和版本：此时文件确定是官方种子，
+        // 避免后续 SEED_VERSION 变化时因缺哈希而无法识别官方文件
+        registerSeedHashes(ctx)
     }
 
     /**
@@ -183,6 +186,26 @@ object RuntimeInstaller {
             versionFile.parentFile?.mkdirs()
             versionFile.writeText("$SEED_VERSION\n")
         }
+    }
+
+    /**
+     * 首次解压 home 后立即登记种子信息：写入实际解压出来的文件哈希 + 当前 SEED_VERSION。
+     * 此时内容确定是官方种子，可安全登记。与 Fix #1 共用 KNOWN_SEED_HASHES 做缺哈希设备的识别迁移。
+     */
+    internal fun registerSeedHashes(ctx: Context) {
+        val seeds = listOf(
+            ".kimi-code/AGENTS.md",
+            ".kimi-code/skills/kimipocket-update/SKILL.md",
+        )
+        for (name in seeds) {
+            val target = File(ctx.filesDir, "home/$name")
+            if (!target.isFile) continue
+            val hashFile = File(target.parentFile, "${target.name}.seedhash")
+            hashFile.writeText(sha256hex(target.readBytes()))
+        }
+        val versionFile = File(ctx.filesDir, "home/.kimi-code/.seed_version")
+        versionFile.parentFile?.mkdirs()
+        versionFile.writeText("$SEED_VERSION\n")
     }
 
     /** SHA-256 哈希（十六进制字符串） */
