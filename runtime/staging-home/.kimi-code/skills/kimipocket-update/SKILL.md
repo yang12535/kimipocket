@@ -5,7 +5,7 @@ description: |
   升级引擎（kimi-code 本体）、安装系统包（pkg/apt）、升级 APK，或说「更新」「升级」
   「update」「upgrade」时使用。也用于更新出故障时的自救指引。
 metadata:
-  version: "1.2.0"
+  version: "1.2.1"
 ---
 
 # 口袋Kimi：项目信息与更新指南
@@ -68,12 +68,29 @@ am start -a android.intent.action.VIEW \
 回退方案：告诉用户手动打开浏览器访问 https://github.com/yang12535/kimipocket/releases 。
 
 **未开启存储权限时**，`curl -o /sdcard/Download/...` 或任何写公共目录的命令会 EACCES 失败，
-此时只走上面的浏览器方式。**已开启存储权限时**（见下文「文件导出」章节），可以直接
-`curl -o /sdcard/Download/kimipocket.apk ...`，但仍需引导用户亲手点击安装。
+此时只走上面的浏览器方式。**已开启存储权限时**（见下文「文件导出」章节），可以用
+curl 直接下载，但仍需引导用户亲手点击安装：
 
-下载完后告诉用户：在浏览器下载记录或文件管理器里点这个 APK 安装（签名一致可直接
-覆盖，登录态和文件都在）→ 装完打开 App：若新版含运行时更新，首次打开会自动重装
-运行环境（约 20 秒，界面有进度提示）；没有运行时更新则直接可用。
+```bash
+# 已开启存储权限时的回退方案（am start 报错时）：
+# 1. 下载 APK（-f 遇 HTTP 错误即失败，-L 跟随重定向）
+curl -fL -o /sdcard/Download/kimipocket.apk <release-notes 里贴的直接下载链接>
+
+# 2. 校验 SHA-256（release notes 里会公布校验值）
+sha256sum /sdcard/Download/kimipocket.apk
+# 对比输出与 release notes 的 SHA-256，一致才能装
+
+# 3. 引导用户在文件管理器里点击 APK 安装
+```
+
+**下载后必须校验 SHA-256**：对比 `sha256sum` 输出与 release notes 公布的校验值。
+不一致说明下载损坏或被篡改，**禁止引导用户安装**。
+
+浏览器下载同理：装之前告诉用户在文件管理器里长按 APK → 详情 → 看文件大小和修改时间，
+与 release notes 公布的数值对比。
+
+装完打开 App：若新版含运行时更新，首次打开会自动重装运行环境（约 20 秒，界面有
+进度提示）；没有运行时更新则直接可用。
 
 ## 文件导出（把做好的文件交给用户）
 
