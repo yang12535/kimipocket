@@ -183,7 +183,9 @@ class KimiService : Service() {
 
                 本目录位置：Android/data/com.kimbox/files/workspace
                 （安卓 11 起文件管理器可能进不去这个目录：连电脑可以看到；
-                 要导出文件到手机公共位置，点右上角 ⚙️ 设置 → 导出文件）
+                 要导出文件到手机公共位置，点右上角 ⚙️ 设置 → 导出文件；
+                 或者开启「存储权限」后直接读写 /sdcard/ 公共目录，
+                 例如 cp 文件.jar /sdcard/Download/）
                 """.trimIndent() + "\n"
             )
         }
