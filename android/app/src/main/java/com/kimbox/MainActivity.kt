@@ -182,18 +182,36 @@ class MainActivity : Activity() {
     private fun showSettingsDialog() {
         val dot = if (updateUnseen) " 🔴" else ""
         val storageStatus = if (isStoragePermissionGranted()) "存储权限（已开启）" else "存储权限"
-        val items = arrayOf("检查更新$dot", "导出文件", storageStatus)
+        val items = arrayOf("检查更新$dot", "导出文件", "刷新页面", storageStatus)
         AlertDialog.Builder(this)
             .setTitle("设置")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> showUpdateDialog()
                     1 -> showExportDialog()
-                    2 -> showStoragePermissionWarning()
+                    2 -> refreshWebPage()
+                    3 -> showStoragePermissionWarning()
                 }
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    /**
+     * 手动刷新页面：WS 断连/页面卡「请求中」无响应时的用户自救入口（issue #22）。
+     * 不能用 web.reload()——引擎重启后端口会变，reload 只会重复请求旧端口；
+     * 始终加载 KimiState.url 里的最新地址。同步复位 loadedUrl 与遮罩，
+     * 与 poller 的加载分支行为保持一致。
+     */
+    private fun refreshWebPage() {
+        val url = KimiState.url
+        if (url == null) {
+            Toast.makeText(this, "引擎未就绪，暂无页面可刷新", Toast.LENGTH_SHORT).show()
+            return
+        }
+        loadedUrl = url
+        web.loadUrl(url)
+        overlay.visibility = View.GONE
     }
 
     /**
