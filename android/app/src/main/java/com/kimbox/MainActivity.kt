@@ -1,14 +1,17 @@
 package com.kimbox
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
@@ -46,6 +49,7 @@ class MainActivity : Activity() {
         private const val FILE_CHOOSER_REQ = 42
         private const val EXPORT_PICKER_REQ = 43
         private const val MENU_SETTINGS = 1
+        private const val STORAGE_PERMISSION_REQ = 100
     }
 
     /** agent 把要导出的文件放这里，用户走 设置菜单 → 导出文件（SAF）保存到公共位置 */
@@ -164,19 +168,127 @@ class MainActivity : Activity() {
         return super.onOptionsItemSelected(item)
     }
 
+    private fun isStoragePermissionGranted(): Boolean =
+        checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+        checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
     private fun showSettingsDialog() {
         val dot = if (updateUnseen) " 🔴" else ""
-        val items = arrayOf("检查更新$dot", "导出文件")
+        val storageStatus = if (isStoragePermissionGranted()) "存储权限（已开启）" else "存储权限"
+        val items = arrayOf("检查更新$dot", "导出文件", storageStatus)
         AlertDialog.Builder(this)
             .setTitle("设置")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> showUpdateDialog()
                     1 -> showExportDialog()
+                    2 -> showStoragePermissionWarning()
                 }
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    /**
+     * 存储权限：先弹醒目风险警告，确认后再走系统授权流程。
+     * 已永久拒绝（shouldShowRequestPermissionRationale=false 且未授权）时直接跳系统应用详情页，
+     * 让用户手动开启「文件和媒体」权限。
+     */
+    private fun showStoragePermissionWarning() {
+        if (isStoragePermissionGranted()) {
+            Toast.makeText(this, "存储权限已开启", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val warning = android.text.SpannableStringBuilder(
+            "授予此权限后，Kimi（AI agent）可以读写手机公共存储中的全部文件" +
+            "（照片、下载、文档等）。\n\n" +
+            "⚠️ 风险说明：\n" +
+            "• 误操作或恶意指令可能损坏或泄露你的数据\n" +
+            "• 建议仅在需要时开启，用完可到系统设置关闭\n" +
+            "• Kimi 将能直接访问 /sdcard/ 下的所有公共目录"
+        ).apply {
+            setSpan(android.text.style.ForegroundColorSpan(Color.RED), 0, length,
+                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("⚠️ 存储权限 — 风险警告")
+            .setMessage(warning)
+            .setPositiveButton("我已了解，继续授权") { _, _ -> requestStoragePermission() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
+     * 存储权限请求状态机（三态，由 SharedPreferences "storageRequested" + shouldShowRequestPermissionRationale 联合判定）：
+     *
+     * ┌─────────────────────────────────────────────────────────────────────────────────────┐
+     * │ 状态          │ storageRequested │ shouldShowRationale │ 行为                       │
+     * ├─────────────────────────────────────────────────────────────────────────────────────┤
+     * │ A. 首次未问过 │ false             │ false（系统首次）    │ 调 requestPermissions，    │
+     * │               │                   │                      │ 并置标记 true              │
+     * │ B. 问过被拒    │ true              │ true                 │ 再次 requestPermissions   │
+     * │ （可重试）     │                   │ （用户未勾选不再询问）│ （系统仍弹窗）             │
+     * │ C. 永久拒绝    │ true              │ false                │ 跳系统应用详情页，让用户  │
+     * │ （不再询问）    │                   │                      │ 手动开启                  │
+     * └─────────────────────────────────────────────────────────────────────────────────────┘
+     *
+     * 关键：storageRequested 标记只从 false → true，被拒时绝不清回 false。
+     * 否则永久拒绝后会死循环：每次点击都重新走 requestPermissions（系统静默拒绝、无弹窗），
+     * 永远到不了跳系统设置的分支。
+     */
+    private fun requestStoragePermission() {
+        if (isStoragePermissionGranted()) return
+        val prefs = getPreferences(MODE_PRIVATE)
+        val askedBefore = prefs.getBoolean("storageRequested", false)
+        val canShowDialog = shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+
+        if (!askedBefore && !canShowDialog) {
+            // 状态 A：首次未问过 — shouldShowRequestPermissionRationale 首次固定返回 false，
+            // 必须调一次 requestPermissions 让系统弹窗；同时落盘标记，后续不再走此分支
+            prefs.edit().putBoolean("storageRequested", true).apply()
+            requestPermissions(
+                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        Manifest.permission.READ_EXTERNAL_STORAGE),
+                STORAGE_PERMISSION_REQ
+            )
+            return
+        }
+        if (askedBefore && !canShowDialog) {
+            // 状态 C：永久拒绝 — 用户勾选了「不再询问」或系统不再弹窗，
+            // 再 requestPermissions 只会被静默拒绝，直接跳系统应用详情页
+            try {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:$packageName")
+                })
+                Toast.makeText(this, "请在应用权限中开启「存储」或「文件和媒体」权限", Toast.LENGTH_LONG).show()
+            } catch (e: ActivityNotFoundException) {
+                Toast.makeText(this, "无法打开应用设置页，请手动到系统设置 → 应用 → 口袋Kimi → 权限", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        // 状态 B：问过被拒但可重试 — shouldShowRequestPermissionRationale=true，
+        // 系统仍会弹授权弹窗，直接 requestPermissions
+        requestPermissions(
+            arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                    Manifest.permission.READ_EXTERNAL_STORAGE),
+            STORAGE_PERMISSION_REQ
+        )
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        if (requestCode == STORAGE_PERMISSION_REQ) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                Toast.makeText(this, "已授权，Kimi 现在可以访问公共目录", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(this, "权限被拒绝，可稍后在设置中重新开启", Toast.LENGTH_LONG).show()
+                // 注意：不清 storageRequested 标记。标记只记录「是否问过」，用于区分首次与永久拒绝。
+                // 清回 false 会导致永久拒绝后死循环（每次点击都重走 requestPermissions 而非跳系统设置）
+            }
+            // 刷新设置菜单显示最新状态
+            invalidateOptionsMenu()
+        } else {
+            super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        }
     }
 
     // ── 检查更新（GitHub Releases）────────────────────────────

@@ -5,7 +5,7 @@ description: |
   升级引擎（kimi-code 本体）、安装系统包（pkg/apt）、升级 APK，或说「更新」「升级」
   「update」「upgrade」时使用。也用于更新出故障时的自救指引。
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # 口袋Kimi：项目信息与更新指南
@@ -56,9 +56,7 @@ pkg upgrade         # 升级所有包
 
 ### 3. APK / 运行时——agent 只能下载和引导，安装必须用户亲手点
 
-agent 没有安装 APK 的权限，也不能往公共目录写文件（应用无存储权限，curl 下载
-到 `/sdcard/Download` 在 Android 10+ 会 EACCES）。正确做法是**调系统浏览器**
-让它自己去下载——浏览器有自己的存储权限：
+agent 没有安装 APK 的权限。正确做法是**调系统浏览器**让它自己去下载——浏览器有自己的存储权限：
 
 ```bash
 # 优先：直接让浏览器打开 releases 页面，用户自己点 APK 下载
@@ -69,7 +67,9 @@ am start -a android.intent.action.VIEW \
 如果 `am start` 报错（极少见，比如某些精简 ROM 砍了 Activity Manager CLI），
 回退方案：告诉用户手动打开浏览器访问 https://github.com/yang12535/kimipocket/releases 。
 
-**禁止**用 `curl -o /sdcard/Download/...` 或任何写公共目录的命令，一定会失败。
+**未开启存储权限时**，`curl -o /sdcard/Download/...` 或任何写公共目录的命令会 EACCES 失败，
+此时只走上面的浏览器方式。**已开启存储权限时**（见下文「文件导出」章节），可以直接
+`curl -o /sdcard/Download/kimipocket.apk ...`，但仍需引导用户亲手点击安装。
 
 下载完后告诉用户：在浏览器下载记录或文件管理器里点这个 APK 安装（签名一致可直接
 覆盖，登录态和文件都在）→ 装完打开 App：若新版含运行时更新，首次打开会自动重装
@@ -77,14 +77,32 @@ am start -a android.intent.action.VIEW \
 
 ## 文件导出（把做好的文件交给用户）
 
-应用没有写公共目录的权限，**禁止** `cp / mv` 到 `/sdcard/Download` 等公共路径
-（EACCES）。正确流程：
+能否直接写公共目录取决于用户是否开启了「存储权限」。写之前先用一条命令判定：
+
+```bash
+touch /sdcard/Download/.kimipocket_probe && rm /sdcard/Download/.kimipocket_probe && echo "存储权限已开启" || echo "存储权限未开启"
+```
+
+### 存储权限已开启
+
+可以直接读写 `/sdcard/` 公共目录。把文件放到用户指定的位置即可，例如：
+
+```bash
+cp output.pdf /sdcard/Download/output.pdf
+```
+
+不需要走 `~/exports/` + 导出按钮流程。
+
+### 存储权限未开启（默认状态）
+
+写公共目录会 EACCES 失败。走以下流程：
 
 1. 把要导出的文件放到 `~/exports/`（即 `/data/data/com.kimbox/files/home/exports/`）。
    如果目录不存在就 `mkdir -p ~/exports`。
 2. 告诉用户：点 App 右上角标题栏的 ⚙️ 设置 → 导出文件 → 选择文件 → 选保存位置。
 
 这个按钮走的是系统文件选择器（SAF），系统会处理权限和写入，不需要应用有存储权限。
+如果用户想开启存储权限，引导他到 ⚙️ 设置 → 存储权限 → 阅读风险警告后确认授权。
 
 ## 出故障时的自救顺序
 

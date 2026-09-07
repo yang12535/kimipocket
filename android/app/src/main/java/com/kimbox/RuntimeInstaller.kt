@@ -25,7 +25,7 @@ object RuntimeInstaller {
     // 通过比对设备文件哈希与上次种子哈希判断用户是否改过：
     // - 哈希匹配 → 用户未改 → 安全覆盖
     // - 哈希不匹配 → 用户改过 → 跳过并记日志
-    private const val SEED_VERSION = 3
+    private const val SEED_VERSION = 4
 
     // 解压后约 350MB（usr/ ~233MB + 缓存增长余量），低于这个值宁可报错也别解一半
     private const val MIN_FREE_BYTES = 700L * 1024 * 1024
