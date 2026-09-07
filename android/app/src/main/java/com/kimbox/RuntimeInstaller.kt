@@ -50,6 +50,12 @@ object RuntimeInstaller {
     // 解压后约 350MB（usr/ ~233MB + 缓存增长余量），低于这个值宁可报错也别解一半
     private const val MIN_FREE_BYTES = 700L * 1024 * 1024
 
+    /** 运行时关键文件：marker 正确但这些文件缺失/不可执行时，视为运行时损坏需重解压 */
+    private val RUNTIME_CRITICAL_FILES = listOf(
+        "usr/bin/node",
+        "usr/lib/libtermux-exec.so",
+    )
+
     @Synchronized
     fun ensureInstalled(ctx: Context) {
         val usr = File(ctx.filesDir, "usr")
@@ -57,7 +63,17 @@ object RuntimeInstaller {
         val installed = try {
             if (marker.exists()) marker.readText().trim().toIntOrNull() else null
         } catch (_: Exception) { null }
-        if (installed == RUNTIME_VERSION) return
+        if (installed == RUNTIME_VERSION) {
+            // Pre-flight：即使 marker 正确，也验证关键可执行文件存在且可执行。
+            // 缺失/不可执行说明运行时被损坏（误删、文件系统错误等），需要重解压。
+            // 有界保护：由调用方（KimiService）控制同一启动内最多触发一次，避免死循环。
+            val missing = RUNTIME_CRITICAL_FILES.firstOrNull { path ->
+                val f = File(ctx.filesDir, path)
+                !f.exists() || !f.canExecute()
+            }
+            if (missing == null) return
+            android.util.Log.w("kimbox", "runtime pre-flight failed: $missing missing or not executable, re-extracting")
+        }
 
         // 只要 usr/ 还在就得先清：版本升级（marker 在）或上次清理失败的半截树
         // （marker 已删但残留幸存，installed == null 也不能放过）。覆盖式解压会在
