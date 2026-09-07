@@ -22,10 +22,30 @@ object RuntimeInstaller {
     private const val RUNTIME_VERSION = 7
 
     // home/ 种子文件版本号：当种子内容变化时 +1，触发已装机型的覆盖更新（仅限用户未修改的文件）。
-    // 通过比对设备文件哈希与上次种子哈希判断用户是否改过：
-    // - 哈希匹配 → 用户未改 → 安全覆盖
-    // - 哈希不匹配 → 用户改过 → 跳过并记日志
-    private const val SEED_VERSION = 4
+    // 覆盖决策唯一依据：磁盘文件哈希 ∈ KNOWN_SEED_HASHES（已知官方发布哈希集合）。
+    // .seedhash 文件仅作诊断参考，不作为覆盖授权依据。
+    private const val SEED_VERSION = 5
+
+    /**
+     * 已知官方种子哈希表：path → 该文件在所有历史发布版中的 SHA-256 集合。
+     * 覆盖决策的唯一依据——磁盘上的文件哈希在此集合中 → 说明是未被修改的官方种子，可安全覆盖；
+     * 不在集合中 → 用户改过或来源不明，一律保留不覆盖。
+     * 每次发布新种子内容时，把旧哈希和新哈希都保留在集合里。
+     */
+    private val KNOWN_SEED_HASHES: Map<String, Set<String>> = mapOf(
+        ".kimi-code/AGENTS.md" to setOf(
+            // v0.2.1 / v0.2.2 / v0.2.3（三版内容相同）
+            "655e82629bd45b43a30749f4bc104f97fc93e67cf02288d79c796120d5bfedd5",
+        ),
+        ".kimi-code/skills/kimipocket-update/SKILL.md" to setOf(
+            // v0.2.1
+            "48d1bb1894f9dae63c06efac364da688a36abd4f8c38a244136139e29bf6279d",
+            // v0.2.2
+            "6c1fd84ec95212fa1d8e4d6bc4b26238c605f3ad220762fddd4758279f259385",
+            // v0.2.3
+            "f794b45916f3ea413ffb1b26d7ec6c88ebb712391fd13f192eaa79a3c7588e0f",
+        ),
+    )
 
     // 解压后约 350MB（usr/ ~233MB + 缓存增长余量），低于这个值宁可报错也别解一半
     private const val MIN_FREE_BYTES = 700L * 1024 * 1024
@@ -94,13 +114,13 @@ object RuntimeInstaller {
 
     /**
      * 老装机补偿 + 版本更新：记忆模块的注入文件缺失时单独补种（不整包重解压）。
-     * 当 SEED_VERSION 增加时，覆盖用户未修改过的旧种子（通过哈希比对判断）：
+     * 当 SEED_VERSION 增加时，仅覆盖已知官方种子（通过 KNOWN_SEED_HASHES 判定）：
      * - 文件不存在 → 写入新种子
-     * - 文件存在且哈希匹配上次种子 → 用户未改 → 覆盖为新版本
-     * - 文件存在但哈希不匹配 → 用户改过 → 跳过并记日志
+     * - 文件存在且哈希 ∈ KNOWN_SEED_HASHES → 未修改的官方种子 → 覆盖为新版本
+     * - 文件存在且哈希 ∉ KNOWN_SEED_HASHES → 用户改过或来源不明 → 保留不覆盖
      *
-     * 首次迁移（无哈希文件）：不覆盖现有文件（安全默认），但记录当前哈希作为基线，
-     * 后续版本更新可正确检测用户修改。
+     * .seedhash 仅作诊断记录（写入当前文件的实际哈希），不作为覆盖授权依据。
+     * 兼容旧版写错基线的设备：错误基线不再被信任，天然自愈。
      */
     @Synchronized
     fun ensureAgentsMd(ctx: Context) {
@@ -109,7 +129,6 @@ object RuntimeInstaller {
             ".kimi-code/skills/kimipocket-update/SKILL.md",
         )
 
-        // 检查种子版本是否需要更新
         val versionFile = File(ctx.filesDir, "home/.kimi-code/.seed_version")
         val installedVersion = try {
             if (versionFile.exists()) versionFile.readText().trim().toIntOrNull() else null
@@ -120,9 +139,6 @@ object RuntimeInstaller {
             val target = File(ctx.filesDir, "home/$name")
             val data = readAssetEntry(ctx, "kimihome.pkg", name) ?: continue
             val hashFile = File(target.parentFile, "${target.name}.seedhash")
-            val lastSeedHash = try {
-                if (hashFile.exists()) hashFile.readText().trim() else null
-            } catch (_: Exception) { null }
 
             if (!target.exists()) {
                 // 文件缺失：始终补种
@@ -131,28 +147,22 @@ object RuntimeInstaller {
                 hashFile.writeText(sha256hex(data))
                 android.util.Log.i("kimbox", "seeded home/$name (missing)")
             } else if (needsUpdate) {
-                // 版本变更：检查用户是否修改过
                 val currentHash = sha256hex(target.readBytes())
-                if (lastSeedHash != null && currentHash == lastSeedHash) {
-                    // 哈希匹配 → 用户未改 → 安全覆盖
+                val knownHashes = KNOWN_SEED_HASHES[name] ?: emptySet()
+                if (currentHash in knownHashes) {
+                    // 磁盘文件是已知官方种子 → 安全覆盖
                     target.writeBytes(data)
                     hashFile.writeText(sha256hex(data))
                     android.util.Log.i("kimbox", "updated seed home/$name (v$SEED_VERSION)")
                 } else {
-                    // 哈希不匹配或首次迁移（lastSeedHash=null）→ 用户可能改过 → 跳过
-                    // 但记录当前哈希作为基线，下次版本更新时可正确检测
-                    if (lastSeedHash == null) {
-                        hashFile.writeText(currentHash)
-                        android.util.Log.i("kimbox", "baseline hash recorded for home/$name (first migration)")
-                    } else {
-                        android.util.Log.i("kimbox", "skipping seed home/$name: user-customized")
-                    }
+                    // 哈希不在已知官方集合中 → 用户改过或来源不明 → 保留
+                    hashFile.writeText(currentHash)
+                    android.util.Log.i("kimbox", "skipping seed home/$name: not a known official seed hash")
                 }
             }
             // else: 版本相同且文件存在 → 不动
         }
 
-        // 写入版本标记
         if (needsUpdate) {
             versionFile.parentFile?.mkdirs()
             versionFile.writeText("$SEED_VERSION\n")
