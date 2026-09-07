@@ -8,7 +8,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -169,8 +171,13 @@ class MainActivity : Activity() {
     }
 
     private fun isStoragePermissionGranted(): Boolean =
-        checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
-        checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= 30) {
+            // Android 11+：READ/WRITE 拿不到 /sdcard 原始路径，唯一通道是所有文件访问（special appop）
+            Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
 
     private fun showSettingsDialog() {
         val dot = if (updateUnseen) " 🔴" else ""
@@ -191,8 +198,8 @@ class MainActivity : Activity() {
 
     /**
      * 存储权限：先弹醒目风险警告，确认后再走系统授权流程。
-     * 已永久拒绝（shouldShowRequestPermissionRationale=false 且未授权）时直接跳系统应用详情页，
-     * 让用户手动开启「文件和媒体」权限。
+     * Android 11+（API 30+）：跳系统「所有文件访问权限」开关页（MANAGE_EXTERNAL_STORAGE，special appop）。
+     * Android 10 及以下：READ/WRITE 运行时权限弹窗；已永久拒绝时直接跳系统应用详情页。
      */
     private fun showStoragePermissionWarning() {
         if (isStoragePermissionGranted()) {
@@ -219,7 +226,8 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 存储权限请求状态机（三态，由 SharedPreferences "storageRequested" + shouldShowRequestPermissionRationale 联合判定）：
+     * 存储权限请求状态机（仅 Android 10 及以下；API 30+ 走 special appop 跳设置页，不经过这里）。
+     * 三态，由 SharedPreferences "storageRequested" + shouldShowRequestPermissionRationale 联合判定：
      *
      * ┌─────────────────────────────────────────────────────────────────────────────────────┐
      * │ 状态          │ storageRequested │ shouldShowRationale │ 行为                       │
@@ -238,6 +246,25 @@ class MainActivity : Activity() {
      */
     private fun requestStoragePermission() {
         if (isStoragePermissionGranted()) return
+        if (Build.VERSION.SDK_INT >= 30) {
+            // Android 11+：special appop，系统不弹运行时对话框，
+            // 只能把用户带到「所有文件访问权限」开关页手动开；无「永久拒绝」概念，每次点击都跳。
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:$packageName")
+                })
+                Toast.makeText(this, "请在打开的页面中允许「所有文件访问权限」，然后返回", Toast.LENGTH_LONG).show()
+            } catch (e: ActivityNotFoundException) {
+                // 个别 ROM 没有直达页，退到总列表页
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                    Toast.makeText(this, "请在列表中找到口袋Kimi并允许「所有文件访问权限」", Toast.LENGTH_LONG).show()
+                } catch (e2: ActivityNotFoundException) {
+                    Toast.makeText(this, "无法打开授权页，请手动到系统设置 → 特殊权限设置 → 所有文件访问权限", Toast.LENGTH_LONG).show()
+                }
+            }
+            return
+        }
         val prefs = getPreferences(MODE_PRIVATE)
         val askedBefore = prefs.getBoolean("storageRequested", false)
         val canShowDialog = shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)
