@@ -30,7 +30,7 @@ max_context_size = 1048576
 capabilities = [ "thinking", "always_thinking", "image_in", "video_in", "tool_use" ]
 display_name = "K3"
 support_efforts = [ "low", "high", "max" ]
-default_effort = "high"
+default_effort = "max"
 
 [models."kimi-code/k3-256k"]
 provider = "managed:kimi-code"
@@ -39,7 +39,7 @@ max_context_size = 262144
 capabilities = [ "thinking", "always_thinking", "image_in", "tool_use" ]
 display_name = "K3-256k"
 support_efforts = [ "low", "high", "max" ]
-default_effort = "high"
+default_effort = "max"
 
 [models.k3-256k-max]
 provider = "managed:kimi-code"
@@ -54,7 +54,7 @@ default_effort = "max"
 
 [thinking]
 enabled = true
-effort = "high"
+effort = "max"
 
 [services.moonshot_search]
 base_url = "https://api.kimi.com/coding/v1/search"
