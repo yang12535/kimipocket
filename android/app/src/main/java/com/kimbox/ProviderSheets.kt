@@ -22,6 +22,9 @@ class ProviderSheets(
     home: File,
 ) {
     private val file = Providers.configFile(home)
+    // RuntimeInstaller.ensureHome() 解压完初始 home 才写这个标记。在那之前抢先建出 .kimi-code/
+    // 会让它误以为初始化过、跳过整包解压，内置订阅/默认模型等初始配置就永久缺失了
+    private val homeReady = File(home, ".home_ready")
     private val handler = Handler(Looper.getMainLooper())
 
     private fun toast(msg: String, long: Boolean = false) =
@@ -35,6 +38,7 @@ class ProviderSheets(
 
     /** 写回前先留一份上一版（config.toml.kimbox-bak），配置被改坏时可以手动恢复 */
     private fun writeConfig(cfg: ConfigToml): Boolean = try {
+        check(homeReady.exists()) { "首次初始化还没完成，稍后再试" }
         if (file.isFile) file.copyTo(File(file.parentFile, "config.toml.kimbox-bak"), overwrite = true)
         file.parentFile?.mkdirs()
         file.writeText(cfg.toText())
@@ -46,6 +50,9 @@ class ProviderSheets(
     // ── 列表 ─────────────────────────────────────────────
 
     fun showList() {
+        if (!homeReady.exists()) {
+            toast("首次初始化还没完成，等加载页走完再来"); return
+        }
         val cfg = readConfig() ?: return
         val p = palette()
         val providers = Providers.load(cfg)
