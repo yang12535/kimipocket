@@ -1,6 +1,5 @@
 package com.kimbox
 
-import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Dialog
 import android.content.res.ColorStateList
@@ -10,12 +9,12 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.view.Gravity
-import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -266,6 +265,7 @@ object Ui {
         fun paint(sel: Int) {
             cells.forEachIndexed { i, c ->
                 val on = i == sel
+                c.isSelected = on // 读屏软件据此报「已选择」
                 c.setTextColor(if (on) p.text else p.sub)
                 c.setTypeface(Typeface.DEFAULT, if (on) Typeface.BOLD else Typeface.NORMAL)
                 c.background = if (on) rounded(if (p.dark) p.divider else p.bg, a.dp(9).toFloat()) else null
@@ -340,6 +340,20 @@ object Ui {
         init {
             parent.addView(view, FrameLayout.LayoutParams(size, size))
             dotView.visibility = View.GONE
+            // 读屏/键盘用户走标准点击、长按动作（触摸由下面的拖动处理接管，两者互不影响）
+            view.contentDescription = "设置"
+            view.isFocusable = true
+            view.setOnClickListener { onTap() }
+            view.setOnLongClickListener { onLongPress(); true }
+            view.accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(
+                        AccessibilityNodeInfo.ACTION_CLICK, "打开设置"))
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(
+                        AccessibilityNodeInfo.ACTION_LONG_CLICK, "切换亮色/暗色"))
+                }
+            }
             attachDrag()
             parent.post { restorePosition() }
             parent.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
@@ -359,6 +373,7 @@ object Ui {
 
         fun setDot(on: Boolean) {
             dotView.visibility = if (on) View.VISIBLE else View.GONE
+            view.contentDescription = if (on) "设置，有新版本" else "设置"
         }
 
         private fun restorePosition() {
@@ -370,8 +385,7 @@ object Ui {
             view.y = (yFrac * h).coerceIn(margin.toFloat(), (h - size - margin).toFloat())
         }
 
-        @SuppressLint("ClickableViewAccessibility")
-        private fun attachDrag() {
+                private fun attachDrag() {
             val slop = ViewConfiguration.get(a).scaledTouchSlop
             val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
             var downX = 0f; var downY = 0f; var startX = 0f; var startY = 0f
@@ -379,8 +393,7 @@ object Ui {
             val longPress = Runnable {
                 if (!dragging) {
                     longFired = true
-                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                    onLongPress()
+                    view.performLongClick() // 走 OnLongClickListener，系统顺带给震动反馈
                 }
             }
             view.setOnTouchListener { v, e ->
@@ -414,7 +427,7 @@ object Ui {
                                 .putFloat("y", v.y / parent.height)
                                 .apply()
                         } else if (!longFired && e.actionMasked == MotionEvent.ACTION_UP) {
-                            onTap()
+                            v.performClick()
                         }
                     }
                 }

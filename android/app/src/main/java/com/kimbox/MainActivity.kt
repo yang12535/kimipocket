@@ -50,6 +50,9 @@ class MainActivity : Activity() {
     // <html data-color-scheme>；网页再把实际底色报回来（console 消息），原生状态栏/面板跟着变色。
     private var webScheme = "system"
     private var palette: Ui.Palette = Ui.LIGHT
+    // 钩子是否已在当前页面里跑起来（收到过回报才算）；没跑起来时的外观选择先存着，钩子就绪后补上
+    private var themeHookReady = false
+    private var pendingScheme: String? = null
 
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
 
@@ -133,6 +136,10 @@ class MainActivity : Activity() {
                     try { startActivity(Intent(Intent.ACTION_VIEW, u)) } catch (_: Exception) {}
                     true
                 }
+            }
+
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                themeHookReady = false
             }
 
             override fun onPageFinished(view: WebView, url: String) {
@@ -229,6 +236,13 @@ class MainActivity : Activity() {
     /** 网页报回：「模式|实际明暗|body 底色」 */
     private fun onThemeReport(report: String) {
         val parts = report.split('|')
+        themeHookReady = true
+        pendingScheme?.let { pending ->
+            // 页面没就绪时选的外观，钩子一就绪就补上；补上后会再回报一次，这次的回报直接丢掉
+            pendingScheme = null
+            setWebScheme(pending)
+            return
+        }
         webScheme = parts.getOrNull(0) ?: "system"
         val dark = parts.getOrNull(1) == "dark"
         applyPalette(if (dark) Ui.DARK else Ui.LIGHT, parseCssColor(parts.getOrNull(2)))
@@ -262,8 +276,10 @@ class MainActivity : Activity() {
 
     private fun setWebScheme(mode: String) {
         webScheme = mode
-        if (::web.isInitialized && KimiState.url != null) {
+        if (themeHookReady && ::web.isInitialized) {
             web.evaluateJavascript("window.__kimboxSetScheme && window.__kimboxSetScheme('$mode')", null)
+        } else {
+            pendingScheme = mode
         }
     }
 
