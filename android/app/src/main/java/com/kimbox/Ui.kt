@@ -15,9 +15,13 @@ import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
+import android.text.InputType
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import kotlin.math.abs
 
@@ -154,6 +158,8 @@ object Ui {
                 setGravity(Gravity.BOTTOM)
                 setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 setWindowAnimations(android.R.style.Animation_InputMethod)
+                // 面板里有输入框时，弹键盘把面板顶上去而不是盖住
+                setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
                 addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
                 setDimAmount(0.35f)
                 navigationBarColor = p.bg
@@ -299,6 +305,96 @@ object Ui {
                 if (i > 0) leftMargin = a.dp(10)
             })
         }
+    }
+
+    /** 带标题的单行输入框，返回 (整块视图, 输入框) */
+    fun field(
+        a: Activity, p: Palette, label: String, value: String?, hint: String,
+        password: Boolean = false, enabled: Boolean = true,
+    ): Pair<View, EditText> {
+        val edit = EditText(a).apply {
+            setText(value ?: "")
+            this.hint = hint
+            textSize = 15f
+            isSingleLine = true
+            isEnabled = enabled
+            setTextColor(if (enabled) p.text else p.sub)
+            setHintTextColor(p.sub)
+            background = rounded(p.surface, a.dp(10).toFloat())
+            setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10))
+            inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val box = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(a).apply {
+                text = label
+                textSize = 12f
+                setTextColor(p.sub)
+                setPadding(a.dp(4), 0, 0, a.dp(5))
+            })
+            addView(edit, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        return box to edit
+    }
+
+    /** 标题 + 说明 + 开关 */
+    fun switchRow(a: Activity, p: Palette, title: String, subtitle: String?, checked: Boolean,
+                  onChange: (Boolean) -> Unit): View = LinearLayout(a).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(a.dp(4), a.dp(8), 0, a.dp(8))
+        addView(LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(a).apply { text = title; textSize = 15f; setTextColor(p.text) })
+            if (subtitle != null) addView(TextView(a).apply { text = subtitle; textSize = 12.5f; setTextColor(p.sub) })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        addView(Switch(a).apply {
+            isChecked = checked
+            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+            thumbTintList = ColorStateList(states, intArrayOf(if (p.dark) p.onAccent else Color.WHITE, Color.WHITE))
+            trackTintList = ColorStateList(states, intArrayOf(p.accent, p.divider))
+            setOnCheckedChangeListener { _, c -> onChange(c) }
+        })
+    }
+
+    /** 可勾选的一行（批量选择用） */
+    fun checkRow(a: Activity, p: Palette, title: String, subtitle: String?, checked: Boolean,
+                 enabled: Boolean, onChange: (Boolean) -> Unit): View {
+        val box = CheckBox(a).apply {
+            isChecked = checked
+            isEnabled = enabled
+            buttonTintList = ColorStateList.valueOf(if (enabled) p.text else p.divider)
+            setOnCheckedChangeListener { _, c -> onChange(c) }
+        }
+        return LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, a.dp(4), a.dp(4), a.dp(4))
+            background = ripple(p, null, a.dp(12).toFloat())
+            isClickable = enabled
+            setOnClickListener { box.isChecked = !box.isChecked }
+            addView(box)
+            addView(LinearLayout(a).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(a).apply { text = title; textSize = 15f; setTextColor(if (enabled) p.text else p.sub) })
+                if (subtitle != null) addView(TextView(a).apply { text = subtitle; textSize = 12f; setTextColor(p.sub) })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+    }
+
+    /** 统一样式的二次确认（底部面板），destructive 时确认按钮用警示色 */
+    fun confirm(a: Activity, p: Palette, title: String, message: String, confirmLabel: String,
+                destructive: Boolean = true, onConfirm: () -> Unit) {
+        val sheet = Sheet(a, p, title, message)
+        val ok = button(a, p, confirmLabel, primary = true) { sheet.dismiss(); onConfirm() }
+        if (destructive) {
+            val r = a.dp(12).toFloat()
+            ok.background = rounded(p.danger, r)
+            ok.setTextColor(Color.WHITE)
+        }
+        sheet.addFooter(buttonRow(a, button(a, p, "取消", primary = false) { sheet.dismiss() }, ok))
+        sheet.show()
     }
 
     fun chip(a: Activity, p: Palette, label: String): TextView = TextView(a).apply {

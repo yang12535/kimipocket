@@ -51,6 +51,7 @@ class MainActivity : Activity() {
     private var webScheme = "system"
     private var palette: Ui.Palette = Ui.LIGHT
     // 钩子是否已在当前页面里跑起来（收到过回报才算）；没跑起来时的外观选择先存着，钩子就绪后补上
+    private val providerSheets by lazy { ProviderSheets(this, { palette }, File(filesDir, "home")) }
     private var themeHookReady = false
     private var pendingScheme: String? = null
 
@@ -64,6 +65,39 @@ class MainActivity : Activity() {
         private const val EXPORT_PICKER_REQ = 43
         private const val STORAGE_PERMISSION_REQ = 100
         private const val THEME_MSG = "__kimbox_theme:"
+
+        /**
+         * 找到网页里打开着的弹层就关掉它：Esc、弹层外按下、点 body 三种常见关闭方式都发一遍，
+         * 返回弹层的简短描述（写日志用）；没有弹层返回空串
+         */
+        private const val CLOSE_WEB_OVERLAY_JS = """
+            (function(){
+              var sel = '[role="dialog"],[role="menu"],[role="listbox"],[aria-modal="true"],[data-state="open"][data-side],[data-reka-popper-content-wrapper],[data-radix-popper-content-wrapper]';
+              var els = document.querySelectorAll(sel);
+              var open = null;
+              for (var i = els.length - 1; i >= 0; i--) {
+                var r = els[i].getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) { open = els[i]; break; }
+              }
+              if (!open) return '';
+              var desc = open.tagName.toLowerCase() + '[' + (open.getAttribute('role') || '') + '] ' + String(open.className).slice(0, 60);
+              var ev = {key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true};
+              var t = document.activeElement && open.contains(document.activeElement) ? document.activeElement : open;
+              t.dispatchEvent(new KeyboardEvent('keydown', ev));
+              document.dispatchEvent(new KeyboardEvent('keydown', ev));
+              // 在弹层外的左上角按下（不发 click，免得点到底下的按钮）
+              var out = document.elementFromPoint(2, Math.round(innerHeight / 3)) || document.body;
+              if (open.contains(out)) out = document.body;
+              var pe = {bubbles: true, cancelable: true, composed: true, button: 0, pointerType: 'touch', isPrimary: true, clientX: 2, clientY: Math.round(innerHeight / 3)};
+              out.dispatchEvent(new PointerEvent('pointerdown', pe));
+              out.dispatchEvent(new MouseEvent('mousedown', pe));
+              out.dispatchEvent(new PointerEvent('pointerup', pe));
+              out.dispatchEvent(new MouseEvent('mouseup', pe));
+              // kimi web 的菜单靠「点外面」关闭：click 发给 body 本身，不会落到任何按钮上
+              document.body.dispatchEvent(new MouseEvent('click', pe));
+              return desc;
+            })()
+        """
 
         /**
          * 注入网页的外观钩子（幂等，可反复执行以更新系统明暗）。
@@ -326,6 +360,16 @@ class MainActivity : Activity() {
                 // 面板配色要跟着变，换色后重开一次面板最省事
                 handler.postDelayed({ if (sheet.dialog.isShowing) { sheet.dismiss(); showSettingsDialog() } }, 250)
             }
+        })
+
+        sheet.sectionLabel("模型")
+        val provCount = try {
+            Providers.load(ConfigToml.parse(Providers.configFile(File(filesDir, "home")).readText()))
+        } catch (_: Exception) { emptyList() }
+        sheet.add(Ui.row(this, p, "◇", "供应商与模型",
+            if (provCount.isEmpty()) "接入 OpenAI / Anthropic 兼容接口，设置思考、识图、上下文"
+            else "${provCount.size} 个供应商 · ${provCount.sumOf { it.models.size }} 个模型 · 可设思考/识图/上下文") {
+            sheet.dismiss(); providerSheets.showList()
         })
 
         sheet.sectionLabel("常用")
@@ -777,7 +821,17 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (::web.isInitialized && web.canGoBack()) web.goBack() else moveTaskToBack(true)
+        if (!::web.isInitialized) { moveTaskToBack(true); return }
+        // 网页里开着弹层（模型列表、设置面板等）时先替它按 Esc 关掉；
+        // 这些弹层不进 WebView 历史，以前一按返回整个 App 就退到后台了
+        web.evaluateJavascript(CLOSE_WEB_OVERLAY_JS) { r ->
+            val desc = r?.trim('"').orEmpty()
+            if (desc.isNotEmpty() && r != "null") {
+                android.util.Log.i("kimbox", "back: closed web overlay $desc")
+                return@evaluateJavascript
+            }
+            if (web.canGoBack()) web.goBack() else moveTaskToBack(true)
+        }
     }
 
     override fun onDestroy() {
