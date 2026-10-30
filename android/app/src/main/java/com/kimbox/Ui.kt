@@ -79,11 +79,31 @@ object Ui {
         return RippleDrawable(ColorStateList.valueOf(pressed), content, mask)
     }
 
+    /** 高度不超过屏幕高度一定比例的 ScrollView；maxFraction <= 0 表示不设上限 */
+    private class CappedScrollView(a: Activity) : ScrollView(a) {
+        var maxFraction = 0f
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            var spec = heightMeasureSpec
+            if (maxFraction > 0f) {
+                val cap = (resources.displayMetrics.heightPixels * maxFraction).toInt()
+                val size = MeasureSpec.getSize(heightMeasureSpec)
+                spec = when (MeasureSpec.getMode(heightMeasureSpec)) {
+                    MeasureSpec.UNSPECIFIED -> MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST)
+                    MeasureSpec.AT_MOST -> MeasureSpec.makeMeasureSpec(minOf(cap, size), MeasureSpec.AT_MOST)
+                    else -> heightMeasureSpec
+                }
+            }
+            super.onMeasure(widthMeasureSpec, spec)
+        }
+    }
+
     /** 底部弹出面板：圆角顶、拖拽条、标题，内容区可滚动 */
     class Sheet(val activity: Activity, val p: Palette, title: String?, subtitle: String? = null) {
         val dialog = Dialog(activity)
         val body: LinearLayout
         private val root: LinearLayout
+        private val scroll: CappedScrollView
 
         init {
             val a = activity
@@ -117,12 +137,14 @@ object Ui {
                 })
             }
             body = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
-            val scroll = ScrollView(a).apply {
+            scroll = CappedScrollView(a).apply {
                 isVerticalScrollBarEnabled = false
                 addView(body)
             }
+            // weight=1：窗口放不下时（横屏、分屏）LinearLayout 会把超出的高度从滚动区里扣掉，
+            // 保证标题和底部按钮始终可见；放得下时 AT_MOST 测量下 delta 为 0，不会被撑大
             root.addView(scroll, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
             ).apply { topMargin = a.dp(if (title != null) 12 else 0) })
 
             dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
@@ -139,15 +161,10 @@ object Ui {
             }
         }
 
-        /** 限制内容区最大高度（屏幕比例），长文本在面板里滚动 */
+        /** 限制内容区最大高度（占屏幕高度的比例，转屏后按新高度重算），长文本在面板里滚动 */
         fun maxBodyHeight(fraction: Float) {
-            val max = (activity.resources.displayMetrics.heightPixels * fraction).toInt()
-            body.viewTreeObserver.addOnGlobalLayoutListener {
-                val scroll = body.parent as View
-                if (scroll.height > max) {
-                    scroll.layoutParams = scroll.layoutParams.apply { height = max }
-                }
-            }
+            scroll.maxFraction = fraction
+            scroll.requestLayout()
         }
 
         fun add(v: View, topMarginDp: Int = 0) {
