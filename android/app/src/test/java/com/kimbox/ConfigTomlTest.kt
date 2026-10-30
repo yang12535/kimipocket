@@ -151,5 +151,9 @@ class ConfigTomlTest {
         assertEquals("1000k", Providers.contextLabel(1000000))
         assertEquals(1000000, Providers.parseContext("1000000"))
         assertEquals("131073", Providers.contextLabel(131073))
+        // 输入框写法必须能原样换算回来（十进制长度不能被 k=1024 放大）
+        for (n in listOf(200000, 1000000, 204800, 262144, 1048576, 131073, 128000)) {
+            assertEquals(n, Providers.parseContext(Providers.contextInput(n)))
+        }
     }
 }

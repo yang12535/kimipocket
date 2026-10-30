@@ -372,8 +372,9 @@ object Ui {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, a.dp(4), a.dp(4), a.dp(4))
             background = ripple(p, null, a.dp(12).toFloat())
+            // 禁用的行（如「已添加」）整行都不响应：setOnClickListener 会把 isClickable 重新打开，只能不注册
+            if (enabled) setOnClickListener { box.isChecked = !box.isChecked }
             isClickable = enabled
-            setOnClickListener { box.isChecked = !box.isChecked }
             addView(box)
             addView(LinearLayout(a).apply {
                 orientation = LinearLayout.VERTICAL

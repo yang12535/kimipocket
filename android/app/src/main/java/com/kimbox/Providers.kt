@@ -88,6 +88,13 @@ object Providers {
         else -> n.toString()
     }
 
+    /** 填进自定义输入框的写法：保证 parseContext(contextInput(n)) == n（十进制长度直接写整数） */
+    fun contextInput(n: Int): String = when {
+        n % M1 == 0 -> "${n / M1}m"
+        n % 1024 == 0 -> "${n / 1024}k"
+        else -> n.toString()
+    }
+
     /** 「128k」「200000」「2m」「1.5m」→ token 数；k/m 按 1024 进位（与引擎内置配置一致） */
     fun parseContext(s: String): Int? {
         val t = s.trim().lowercase().replace(",", "").replace("_", "")

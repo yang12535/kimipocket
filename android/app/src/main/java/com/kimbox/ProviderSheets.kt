@@ -206,13 +206,19 @@ class ProviderSheets(
     }
 
     private fun confirmDelete(pr: Providers.Provider, after: () -> Unit) {
-        val cfg = readConfig() ?: return
-        val inUse = Providers.referencedAliases(cfg).intersect(pr.models.mapNotNull { it.alias }.toSet())
-        if (inUse.isNotEmpty()) {
-            toast("${inUse.first()} 正被设为默认模型，先在聊天页换个模型再删", long = true); return
+        // 要删的别名包括面板里已移除但还没保存的那些（delete() 会一并删掉它们的表）
+        val doomed = (pr.models.mapNotNull { it.alias } + pr.removedAliases).toSet()
+        fun blocked(cfg: ConfigToml): Boolean {
+            val inUse = Providers.referencedAliases(cfg).intersect(doomed)
+            if (inUse.isEmpty()) return false
+            toast("${inUse.first()} 正被设为默认模型，先在聊天页换个模型再删", long = true)
+            return true
         }
+        if (blocked(readConfig() ?: return)) return
         Ui.confirm(a, palette(), "删除 ${pr.id}？", "会连同它的 ${pr.models.size} 个模型一起从配置里删掉。", "删除") {
+            // 确认时重新读一遍：弹窗期间引擎或网页可能改过默认模型
             val fresh = readConfig() ?: return@confirm
+            if (blocked(fresh)) return@confirm
             Providers.delete(fresh, pr)
             if (writeConfig(fresh)) { toast("已删除"); after() }
         }
@@ -235,8 +241,8 @@ class ProviderSheets(
         sheet.sectionLabel("上下文长度")
         val presets = Providers.CONTEXT_PRESETS
         var context = m.maxContext
-        val (cv, customEdit) = Ui.field(a, p, "自定义（如 128k、200000、2m）",
-            Providers.contextLabel(m.maxContext), "128k")
+        val initialInput = Providers.contextInput(m.maxContext)
+        val (cv, customEdit) = Ui.field(a, p, "自定义（如 128k、200000、2m）", initialInput, "128k")
         val presetIdx = presets.indexOf(m.maxContext)
         cv.visibility = if (presetIdx < 0) View.VISIBLE else View.GONE
         sheet.add(Ui.segmented(a, p, listOf("256K", "512K", "1M", "自定义"), if (presetIdx < 0) 3 else presetIdx) { i ->
@@ -258,7 +264,9 @@ class ProviderSheets(
             val id = idEdit.text.toString().trim()
             if (id.isEmpty()) { toast("模型 ID 不能空"); return@button }
             if (cv.visibility == View.VISIBLE) {
-                context = Providers.parseContext(customEdit.text.toString())
+                val text = customEdit.text.toString().trim()
+                // 没动过输入框就保留原值，避免换算误差让上下文越存越大
+                context = if (text == initialInput) m.maxContext else Providers.parseContext(text)
                     ?: run { toast("上下文长度看不懂，写成 128k、200000 或 2m 这样"); return@button }
             }
             m.model = id
