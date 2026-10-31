@@ -19,12 +19,12 @@ import java.util.zip.GZIPInputStream
 object RuntimeInstaller {
 
     // 每次 runtime.pkg 内容变化时 +1，触发已装机型的重解压（不动 home/，不影响登录态）
-    private const val RUNTIME_VERSION = 7
+    private const val RUNTIME_VERSION = 8
 
     // home/ 种子文件版本号：当种子内容变化时 +1，触发已装机型的覆盖更新（仅限用户未修改的文件）。
     // 覆盖决策唯一依据：磁盘文件哈希 ∈ KNOWN_SEED_HASHES（已知官方发布哈希集合）。
     // .seedhash 文件仅作诊断参考，不作为覆盖授权依据。
-    private const val SEED_VERSION = 5
+    private const val SEED_VERSION = 6
 
     /**
      * 已知官方种子哈希表：path → 该文件在所有历史发布版中的 SHA-256 集合。
@@ -36,8 +36,14 @@ object RuntimeInstaller {
         ".kimi-code/AGENTS.md" to setOf(
             // v0.1.1（v0.1.0 尚无此文件）
             "72d892a1d77a46850404b086e39310f7a8e45bf9d484d085073616a9039a40a7",
-            // v0.2.0 / v0.2.1 / v0.2.2 / v0.2.3（四版内容相同）
+            // v0.2.0 ~ v0.2.4（五版内容相同）
             "211e9e4317c4b5137883415199ecc6e265b7fcefedaa2913dc9ddca3d7fb2a97",
+            // v0.3.0（少打扰；初始化步骤拆进 memory-init skill）
+            "d2c9c91025a6e2d161acb9626b7e5f22fff2106f6ff1566cbedf9ae6cf1b60a1",
+        ),
+        ".kimi-code/skills/memory-init/SKILL.md" to setOf(
+            // v0.3.0（首发）
+            "037e8f8e96813974ee993cefaa854d0ebbf1848bbeefa6769fae11b78cc1f3c3",
         ),
         ".kimi-code/skills/kimipocket-update/SKILL.md" to setOf(
             // v0.2.0
@@ -157,6 +163,7 @@ object RuntimeInstaller {
         val seeds = listOf(
             ".kimi-code/AGENTS.md",
             ".kimi-code/skills/kimipocket-update/SKILL.md",
+            ".kimi-code/skills/memory-init/SKILL.md",
         )
 
         val versionFile = File(ctx.filesDir, "home/.kimi-code/.seed_version")
@@ -200,8 +207,37 @@ object RuntimeInstaller {
         }
 
         if (needsUpdate) {
+            if ((installedVersion ?: 0) < 6) migrateThinkingEffortMax(ctx)
             versionFile.parentFile?.mkdirs()
             versionFile.writeText("$SEED_VERSION\n")
+        }
+    }
+
+    /**
+     * v0.3.0（SEED_VERSION 6）起默认思考档位改为 max。config.toml 不在种子覆盖范围内
+     * （登录后引擎和 agent 都会改它），这里只在种子版本从 <6 升上来时迁移一次：
+     * [thinking] 段里仍是出厂值 effort = "high" 才改成 "max"，其他值一律不动。
+     */
+    private fun migrateThinkingEffortMax(ctx: Context) {
+        val f = File(ctx.filesDir, "home/.kimi-code/config.toml")
+        if (!f.isFile) return
+        try {
+            var inThinking = false
+            var changed = false
+            val out = f.readLines().map { line ->
+                val t = line.trim()
+                if (t.startsWith("[")) inThinking = t == "[thinking]"
+                if (inThinking && t == "effort = \"high\"") {
+                    changed = true
+                    line.replace("\"high\"", "\"max\"")
+                } else line
+            }
+            if (changed) {
+                f.writeText(out.joinToString("\n", postfix = "\n"))
+                android.util.Log.i("kimbox", "migrated config.toml [thinking] effort high -> max")
+            }
+        } catch (t: Throwable) {
+            android.util.Log.w("kimbox", "thinking effort migration skipped: $t")
         }
     }
 
@@ -213,6 +249,7 @@ object RuntimeInstaller {
         val seeds = listOf(
             ".kimi-code/AGENTS.md",
             ".kimi-code/skills/kimipocket-update/SKILL.md",
+            ".kimi-code/skills/memory-init/SKILL.md",
         )
         for (name in seeds) {
             val target = File(ctx.filesDir, "home/$name")

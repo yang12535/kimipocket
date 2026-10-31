@@ -21,7 +21,7 @@ WebView 通过 `127.0.0.1` 访问内置的 `kimi web` 服务。
 ```
 APK
 ├── assets/runtime.pkg       # gzip tar：从真实跑通的 Termux 环境抽取的最小运行时
-│                            #   (node + npm + bash/coreutils/git + kimi-code 0.40.1)
+│                            #   (node + npm + bash/coreutils/git + kimi-code 2.4.1)
 │                            #   + apt/dpkg 包管理器（清华源，81 个包）
 ├── assets/kimihome.pkg      # 初始 ~/.kimi-code（config.toml + region + 记忆模块提示词
 │                            #   AGENTS.md + kimipocket-update skill，无凭据）
@@ -102,6 +102,14 @@ cd runtime
 #      config.toml 选默认模型、region 标记；不要放任何 token/凭据）
 cp runtime.pkg kimihome.pkg ../android/app/src/main/assets/
 ```
+
+**只升级引擎**（v0.3.0 起的做法，不用重新从手机抽运行时）：解开上一版 `runtime.pkg`，
+只替换 `usr/lib/node_modules/@moonshot-ai/kimi-code/`（PC 上
+`npm i -g --prefix <临时目录> --omit=optional @moonshot-ai/kimi-code@<版本>` 装出来的整个目录，
+删掉 `node_modules/@mariozechner` 和 `native/darwin`、`native/win32`），
+钩子有改动就把 `hooks/usr/libexec/*` 一并覆盖进去，跑一遍 `pre-tar-check.sh`，再按上面第 6 步打包。
+打包后核对：除引擎目录外的文件列表和权限应与旧包逐一相同。kimi-code 是纯 JS，
+不含 `com.termux` 路径，不需要过 `patch_runtime.py`。
 
 ### 2. APK
 

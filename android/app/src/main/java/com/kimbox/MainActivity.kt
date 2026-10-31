@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -14,11 +15,11 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.method.LinkMovementMethod
 import android.view.Gravity
-import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.ConsoleMessage
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -29,6 +30,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import com.kimbox.Ui.dp
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -39,8 +41,19 @@ class MainActivity : Activity() {
     private lateinit var web: WebView
     private lateinit var overlay: View
     private lateinit var statusText: TextView
+    private lateinit var floating: Ui.FloatingEntry
     private val handler = Handler(Looper.getMainLooper())
     private var loadedUrl: String? = null
+
+    // 网页外观：kimi web 把选择存在 localStorage「kimi-web.color-scheme」（light/dark/system，缺省 system）。
+    // targetSdk 28 的 WebView 里 prefers-color-scheme 不可靠，「跟随系统」由原生判断明暗后写进
+    // <html data-color-scheme>；网页再把实际底色报回来（console 消息），原生状态栏/面板跟着变色。
+    private var webScheme = "system"
+    private var palette: Ui.Palette = Ui.LIGHT
+    // 钩子是否已在当前页面里跑起来（收到过回报才算）；没跑起来时的外观选择先存着，钩子就绪后补上
+    private val providerSheets by lazy { ProviderSheets(this, { palette }, File(filesDir, "home")) }
+    private var themeHookReady = false
+    private var pendingScheme: String? = null
 
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
 
@@ -50,8 +63,71 @@ class MainActivity : Activity() {
     companion object {
         private const val FILE_CHOOSER_REQ = 42
         private const val EXPORT_PICKER_REQ = 43
-        private const val MENU_SETTINGS = 1
         private const val STORAGE_PERMISSION_REQ = 100
+        private const val THEME_MSG = "__kimbox_theme:"
+
+        /**
+         * 找到网页里打开着的弹层就关掉它：Esc、弹层外按下、点 body 三种常见关闭方式都发一遍，
+         * 返回弹层的简短描述（写日志用）；没有弹层返回空串
+         */
+        private const val CLOSE_WEB_OVERLAY_JS = """
+            (function(){
+              var sel = '[role="dialog"],[role="menu"],[role="listbox"],[aria-modal="true"],[data-state="open"][data-side],[data-reka-popper-content-wrapper],[data-radix-popper-content-wrapper]';
+              var els = document.querySelectorAll(sel);
+              var open = null;
+              for (var i = els.length - 1; i >= 0; i--) {
+                var r = els[i].getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) { open = els[i]; break; }
+              }
+              if (!open) return '';
+              var desc = open.tagName.toLowerCase() + '[' + (open.getAttribute('role') || '') + '] ' + String(open.className).slice(0, 60);
+              var ev = {key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true};
+              var t = document.activeElement && open.contains(document.activeElement) ? document.activeElement : open;
+              t.dispatchEvent(new KeyboardEvent('keydown', ev));
+              document.dispatchEvent(new KeyboardEvent('keydown', ev));
+              // 在弹层外的左上角按下（不发 click，免得点到底下的按钮）
+              var out = document.elementFromPoint(2, Math.round(innerHeight / 3)) || document.body;
+              if (open.contains(out)) out = document.body;
+              var pe = {bubbles: true, cancelable: true, composed: true, button: 0, pointerType: 'touch', isPrimary: true, clientX: 2, clientY: Math.round(innerHeight / 3)};
+              out.dispatchEvent(new PointerEvent('pointerdown', pe));
+              out.dispatchEvent(new MouseEvent('mousedown', pe));
+              out.dispatchEvent(new PointerEvent('pointerup', pe));
+              out.dispatchEvent(new MouseEvent('mouseup', pe));
+              // kimi web 的菜单靠「点外面」关闭：click 发给 body 本身，不会落到任何按钮上
+              document.body.dispatchEvent(new MouseEvent('click', pe));
+              return desc;
+            })()
+        """
+
+        /**
+         * 注入网页的外观钩子（幂等，可反复执行以更新系统明暗）。
+         * - 模式为 system（或从没选过）时，按原生给的系统明暗写 data-color-scheme；
+         *   网页自己改模式时会先写 localStorage 再改属性，观察者据此重新落地，不会互相打架。
+         * - 每次落地后把「模式|实际底色」经 console 报给原生。
+         */
+        private fun themeHookJs(sysDark: Boolean) = """
+            (function(sysDark){
+              var K='kimi-web.color-scheme', d=document.documentElement;
+              window.__kimboxSysDark = sysDark;
+              function mode(){ try { var v = localStorage.getItem(K); return (v==='light'||v==='dark') ? v : 'system'; } catch(e) { return 'system'; } }
+              function apply(){
+                var m = mode();
+                var want = m === 'system' ? (window.__kimboxSysDark ? 'dark' : 'light') : m;
+                if (d.dataset.colorScheme !== want) d.dataset.colorScheme = want;
+                requestAnimationFrame(function(){
+                  var bg = document.body ? getComputedStyle(document.body).backgroundColor : '';
+                  console.log('$THEME_MSG' + m + '|' + want + '|' + bg);
+                });
+              }
+              window.__kimboxSetScheme = function(m){ try { localStorage.setItem(K, m); } catch(e) {} apply(); };
+              if (!window.__kimboxThemeHooked) {
+                window.__kimboxThemeHooked = true;
+                new MutationObserver(function(){ setTimeout(apply, 0); })
+                  .observe(d, {attributes:true, attributeFilter:['data-color-scheme']});
+              }
+              apply();
+            })($sysDark);
+        """.trimIndent()
     }
 
     /** agent 把要导出的文件放这里，用户走 设置菜单 → 导出文件（SAF）保存到公共位置 */
@@ -95,8 +171,25 @@ class MainActivity : Activity() {
                     true
                 }
             }
+
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                themeHookReady = false
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                injectThemeHook()
+            }
         }
         web.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
+                val m = msg.message()
+                if (m.startsWith(THEME_MSG)) {
+                    onThemeReport(m.removePrefix(THEME_MSG))
+                    return true
+                }
+                return false
+            }
+
             override fun onShowFileChooser(
                 wv: WebView,
                 cb: ValueCallback<Array<Uri>>,
@@ -122,7 +215,6 @@ class MainActivity : Activity() {
         }
 
         statusText = TextView(this).apply {
-            setTextColor(Color.WHITE)
             textSize = 15f
             gravity = Gravity.CENTER
         }
@@ -130,7 +222,6 @@ class MainActivity : Activity() {
         overlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(24, 24, 28))
             addView(bar)
             addView(statusText, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -143,8 +234,13 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(overlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        floating = Ui.FloatingEntry(this, root,
+            onTap = { showSettingsDialog() },
+            onLongPress = { quickToggleTheme() })
 
         setContentView(root)
+        // 网页报回实际底色之前，先按系统明暗上色，避免冷启动白闪/黑闪
+        applyPalette(if (systemDark()) Ui.DARK else Ui.LIGHT, null)
 
         loadCachedRelease()
         refreshDot()
@@ -153,22 +249,90 @@ class MainActivity : Activity() {
         handler.post(poller)
     }
 
-    // 右上角设置入口：二级菜单放「检查更新」「导出文件」等低频操作，不再占用主界面
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        // 有新版且未点看过时齿轮带红点
-        val dot = if (updateUnseen) " 🔴" else ""
-        menu.add(0, MENU_SETTINGS, 0, "⚙️ 设置$dot")
-            .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-        return true
+    // ── 外观 ────────────────────────────────────────────────
+
+    private fun systemDark(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
+    private fun injectThemeHook() {
+        if (::web.isInitialized) web.evaluateJavascript(themeHookJs(systemDark()), null)
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        if (item.itemId == MENU_SETTINGS) {
-            showSettingsDialog()
-            return true
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // 系统切深色/浅色：manifest 声明了 uiMode，Activity 不重建，这里手动把新明暗告诉网页
+        injectThemeHook()
+        if (KimiState.url == null || overlay.visibility == View.VISIBLE) {
+            applyPalette(if (systemDark()) Ui.DARK else Ui.LIGHT, null)
         }
-        return super.onOptionsItemSelected(item)
     }
+
+    /** 网页报回：「模式|实际明暗|body 底色」 */
+    private fun onThemeReport(report: String) {
+        val parts = report.split('|')
+        themeHookReady = true
+        pendingScheme?.let { pending ->
+            // 页面没就绪时选的外观，钩子一就绪就补上；补上后会再回报一次，这次的回报直接丢掉
+            pendingScheme = null
+            setWebScheme(pending)
+            return
+        }
+        webScheme = parts.getOrNull(0) ?: "system"
+        val dark = parts.getOrNull(1) == "dark"
+        applyPalette(if (dark) Ui.DARK else Ui.LIGHT, parseCssColor(parts.getOrNull(2)))
+    }
+
+    private fun parseCssColor(css: String?): Int? {
+        val m = Regex("""rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)""").find(css ?: return null) ?: return null
+        val alpha = m.groupValues[4].toFloatOrNull() ?: 1f
+        if (alpha < 0.5f) return null // 透明底色说明 body 没设背景，退回调色板默认
+        return Color.rgb(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt())
+    }
+
+    /** 状态栏、导航栏、加载页、悬浮钮统一换色；barColor 为网页真实底色（拿不到就用调色板） */
+    @Suppress("DEPRECATION")
+    private fun applyPalette(p: Ui.Palette, barColor: Int?) {
+        palette = p
+        val bg = barColor ?: if (p.dark) Color.rgb(18, 18, 18) else Color.WHITE
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
+        var flags = window.decorView.systemUiVisibility
+        flags = if (p.dark) flags and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+            else flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        flags = if (p.dark) flags and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+            else flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        window.decorView.systemUiVisibility = flags
+        web.setBackgroundColor(bg)
+        overlay.setBackgroundColor(bg)
+        statusText.setTextColor(p.text)
+        floating.applyPalette(p)
+    }
+
+    private fun setWebScheme(mode: String) {
+        webScheme = mode
+        if (themeHookReady && ::web.isInitialized) {
+            web.evaluateJavascript("window.__kimboxSetScheme && window.__kimboxSetScheme('$mode')", null)
+        } else {
+            pendingScheme = mode
+        }
+    }
+
+    /** 长按悬浮钮：在亮/暗之间一键切换（基于当前实际明暗取反，之后不再跟随系统） */
+    private fun quickToggleTheme() {
+        if (KimiState.url == null) {
+            Toast.makeText(this, "引擎还没就绪，稍后再试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val next = if (palette.dark) "light" else "dark"
+        setWebScheme(next)
+        Toast.makeText(this, if (next == "dark") "已切到暗色" else "已切到亮色", Toast.LENGTH_SHORT).show()
+    }
+
+    /** 引擎版本直接读运行时里的 package.json（agent 用 npm 自升级后也能显示真实版本） */
+    private fun engineVersion(): String? = try {
+        val f = File(filesDir, "usr/lib/node_modules/@moonshot-ai/kimi-code/package.json")
+        Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(f.readText())?.groupValues?.get(1)
+    } catch (_: Exception) { null }
 
     private fun isStoragePermissionGranted(): Boolean =
         if (Build.VERSION.SDK_INT >= 30) {
@@ -180,21 +344,62 @@ class MainActivity : Activity() {
         }
 
     private fun showSettingsDialog() {
-        val dot = if (updateUnseen) " 🔴" else ""
-        val storageStatus = if (isStoragePermissionGranted()) "存储权限（已开启）" else "存储权限"
-        val items = arrayOf("检查更新$dot", "导出文件", "刷新页面", storageStatus)
-        AlertDialog.Builder(this)
-            .setTitle("设置")
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> showUpdateDialog()
-                    1 -> showExportDialog()
-                    2 -> refreshWebPage()
-                    3 -> showStoragePermissionWarning()
-                }
+        val p = palette
+        val engine = engineVersion()
+        val sheet = Ui.Sheet(this, p, "口袋Kimi",
+            "App $appVersion" + (if (engine != null) " · 引擎 $engine" else "") + " · 长按悬浮钮可快速切换亮/暗")
+
+        sheet.sectionLabel("外观", topMarginDp = 4)
+        val modes = listOf("system", "light", "dark")
+        sheet.add(Ui.segmented(this, p, listOf("跟随系统", "亮色", "暗色"),
+            modes.indexOf(webScheme).coerceAtLeast(0)) { i ->
+            if (KimiState.url == null) {
+                Toast.makeText(this, "引擎还没就绪，稍后再试", Toast.LENGTH_SHORT).show()
+            } else {
+                setWebScheme(modes[i])
+                // 面板配色要跟着变，换色后重开一次面板最省事
+                handler.postDelayed({ if (sheet.dialog.isShowing) { sheet.dismiss(); showSettingsDialog() } }, 250)
             }
-            .setNegativeButton("取消", null)
-            .show()
+        })
+
+        sheet.sectionLabel("模型")
+        val provCount = try {
+            Providers.load(ConfigToml.parse(Providers.configFile(File(filesDir, "home")).readText()))
+        } catch (_: Exception) { emptyList() }
+        sheet.add(Ui.row(this, p, "◇", "供应商与模型",
+            if (provCount.isEmpty()) "接入 OpenAI / Anthropic 兼容接口，设置思考、识图、上下文"
+            else "${provCount.size} 个供应商 · ${provCount.sumOf { it.models.size }} 个模型 · 可设思考/识图/上下文") {
+            sheet.dismiss(); providerSheets.showList()
+        })
+
+        sheet.sectionLabel("常用")
+        val update = latestRelease
+        val updateSub = when {
+            update == null -> "从 GitHub 获取最新版本"
+            updateAvailable -> "有新版本 ${update.version}"
+            isNewerVersion(appVersion, update.version) -> "本机 $appVersion 比线上 ${update.version} 新"
+            else -> "已是最新"
+        }
+        sheet.add(Ui.row(this, p, "↻", "检查更新", updateSub,
+            trailing = if (updateAvailable) "NEW" else "›",
+            trailingColor = if (updateAvailable) p.danger else null,
+            dot = updateUnseen) { sheet.dismiss(); showUpdateDialog() })
+        sheet.add(Ui.row(this, p, "⟳", "刷新页面", "页面卡住、一直转圈或断连时用") {
+            sheet.dismiss(); refreshWebPage()
+        })
+        sheet.add(Ui.row(this, p, "⇩", "导出文件", "把 Kimi 放进 ~/exports 的文件存到手机里") {
+            sheet.dismiss(); showExportDialog()
+        })
+
+        sheet.sectionLabel("权限")
+        val granted = isStoragePermissionGranted()
+        sheet.add(Ui.row(this, p, "▣", "手机存储",
+            if (granted) "已允许 Kimi 读写下载、相册等公共目录" else "允许后 Kimi 才能读写手机里的文件",
+            trailing = if (granted) "已开启" else "去开启",
+            trailingColor = if (granted) p.sub else p.text) {
+            sheet.dismiss(); showStoragePermissionWarning()
+        })
+        sheet.show()
     }
 
     /**
@@ -336,7 +541,6 @@ class MainActivity : Activity() {
                 // 清回 false 会导致永久拒绝后死循环（每次点击都重走 requestPermissions 而非跳系统设置）
                 Toast.makeText(this, "权限被拒绝，可稍后在设置中重新开启", Toast.LENGTH_LONG).show()
             }
-            invalidateOptionsMenu()
         } else {
             super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         }
@@ -361,7 +565,7 @@ class MainActivity : Activity() {
     private fun refreshDot() {
         updateUnseen = updateAvailable &&
             latestRelease?.version != getPreferences(MODE_PRIVATE).getString("seenVersion", null)
-        invalidateOptionsMenu()
+        floating.setDot(updateUnseen)
     }
 
     private fun markUpdateSeen() {
@@ -377,7 +581,7 @@ class MainActivity : Activity() {
             v,
             p.getString("latestUrl", "") ?: "",
             p.getString("latestNotes", "") ?: "",
-            p.getString("latestTags", "")?.split("|")?.filter { it.isNotEmpty() } ?: emptyList())
+            p.getString("latestTags", "")?.split("|")?.filter { it.isNotEmpty() }?.distinct() ?: emptyList())
         updateAvailable = isNewerVersion(v, appVersion)
     }
 
@@ -399,7 +603,7 @@ class MainActivity : Activity() {
                 val json = JSONObject(conn.inputStream.bufferedReader().readText())
                 val body = json.optString("body", "")
                 val tags = Regex("\\[([^\\]]+)\\]").findAll(body.take(300))
-                    .map { it.groupValues[1] }.toList()
+                    .map { it.groupValues[1] }.distinct().toList()
                 info = ReleaseInfo(
                     json.getString("tag_name").removePrefix("v"),
                     json.getString("html_url"),
@@ -446,28 +650,41 @@ class MainActivity : Activity() {
             return
         }
         val hasUpdate = isNewerVersion(info.version, appVersion)
-        val sb = StringBuilder()
-        sb.append("当前版本：").append(appVersion).append('\n')
-        sb.append("最新版本：").append(info.version)
-        if (hasUpdate) sb.append("  🔴 有更新")
-        sb.append('\n')
+        val p = palette
+        val sheet = Ui.Sheet(this, p,
+            if (hasUpdate) "发现新版本 ${info.version}" else "已是最新版本",
+            if (hasUpdate) "当前 $appVersion → 最新 ${info.version}"
+            else "当前 $appVersion · 线上最新 ${info.version}")
+
         if (info.tags.isNotEmpty()) {
-            sb.append('\n')
-            for (t in info.tags) sb.append('[').append(t).append(']')
-            sb.append('\n')
+            val chips = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            for (t in info.tags) {
+                chips.addView(Ui.chip(this, p, t), LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(6) })
+            }
+            sheet.add(chips, topMarginDp = 2)
         }
-        // 简介太长只给前 800 字，全文走「前往下载」
         val notes = info.notes.trim()
         if (notes.isNotEmpty()) {
-            sb.append('\n').append(if (notes.length > 800) notes.take(800) + "…" else notes)
+            sheet.add(TextView(this).apply {
+                text = MarkdownLite.render(notes, p) { dp(it) }
+                textSize = 14.5f
+                setTextColor(p.text)
+                setLineSpacing(dp(3).toFloat(), 1f)
+                movementMethod = LinkMovementMethod.getInstance()
+                setPadding(dp(14), dp(12), dp(14), dp(14))
+                background = Ui.rounded(if (p.dark) p.surface else Color.rgb(250, 250, 250), dp(14).toFloat(),
+                    p.divider, dp(1))
+            }, topMarginDp = 6)
+            sheet.maxBodyHeight(0.55f)
         }
-        val dlg = AlertDialog.Builder(this)
-            .setTitle(if (hasUpdate) "发现新版本" else "已是最新")
-            .setMessage(sb.toString())
-            .setNegativeButton("关闭", null)
-        if (hasUpdate) {
+
+        val close = Ui.button(this, p, "关闭", primary = false) { sheet.dismiss() }
+        val action = if (hasUpdate) {
             markUpdateSeen()
-            dlg.setPositiveButton("前往下载") { _, _ ->
+            Ui.button(this, p, "前往下载", primary = true) {
+                sheet.dismiss()
                 try {
                     startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.url)))
                 } catch (e: ActivityNotFoundException) {
@@ -476,9 +693,10 @@ class MainActivity : Activity() {
             }
         } else {
             // 没更新时也给个手动刷新入口，防止缓存太旧
-            dlg.setPositiveButton("重新检查") { _, _ -> checkForUpdates(manual = true) }
+            Ui.button(this, p, "重新检查", primary = true) { sheet.dismiss(); checkForUpdates(manual = true) }
         }
-        dlg.show()
+        sheet.addFooter(Ui.buttonRow(this, close, action))
+        sheet.show()
     }
 
     private val poller = object : Runnable {
@@ -509,12 +727,21 @@ class MainActivity : Activity() {
             Toast.makeText(this, "没有可导出的文件\n让 Kimi 先把文件放到 ~/exports/ 目录", Toast.LENGTH_LONG).show()
             return
         }
-        val names = files.map { it.name }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("选择要导出的文件")
-            .setItems(names) { _, which -> launchExportPicker(files[which]) }
-            .setNegativeButton("取消", null)
-            .show()
+        val p = palette
+        val sheet = Ui.Sheet(this, p, "导出文件", "选一个文件，再选保存位置")
+        for (f in files.sortedByDescending { it.lastModified() }) {
+            sheet.add(Ui.row(this, p, "▤", f.name, formatSize(f.length())) {
+                sheet.dismiss(); launchExportPicker(f)
+            })
+        }
+        sheet.maxBodyHeight(0.6f)
+        sheet.show()
+    }
+
+    private fun formatSize(n: Long): String = when {
+        n < 1024 -> "$n B"
+        n < 1024 * 1024 -> "%.1f KB".format(n / 1024.0)
+        else -> "%.1f MB".format(n / 1024.0 / 1024.0)
     }
 
     private fun launchExportPicker(file: File) {
@@ -594,7 +821,17 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (::web.isInitialized && web.canGoBack()) web.goBack() else moveTaskToBack(true)
+        if (!::web.isInitialized) { moveTaskToBack(true); return }
+        // 网页里开着弹层（模型列表、设置面板等）时先替它按 Esc 关掉；
+        // 这些弹层不进 WebView 历史，以前一按返回整个 App 就退到后台了
+        web.evaluateJavascript(CLOSE_WEB_OVERLAY_JS) { r ->
+            val desc = r?.trim('"').orEmpty()
+            if (desc.isNotEmpty() && r != "null") {
+                android.util.Log.i("kimbox", "back: closed web overlay $desc")
+                return@evaluateJavascript
+            }
+            if (web.canGoBack()) web.goBack() else moveTaskToBack(true)
+        }
     }
 
     override fun onDestroy() {

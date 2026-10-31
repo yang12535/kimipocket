@@ -13,6 +13,8 @@
 # - 循环体内可能读 stdin 的命令（dpkg-deb 等）统一 </dev/null，防止吃掉 apt 喂进来
 #   的 deb 列表。
 set -u
+# 解包出来的 DEBIAN/ 与数据目录要能被 dpkg-deb -b 接受（0755~0775），别继承调用方的 077 之类
+umask 022
 # KIMBOX_PREFIX 仅供 PC 侧测试覆盖，设备上走默认绝对前缀。
 P=${KIMBOX_PREFIX:-/data/data/com.kimbox/files/usr}
 export PATH="$P/bin" LD_LIBRARY_PATH="$P/lib" LD_PRELOAD="$P/lib/libtermux-exec.so" TMPDIR="$P/tmp"
@@ -59,6 +61,13 @@ while IFS= read -r deb; do
         cleanup
         continue
     fi
+
+    # 上游有的 deb（如 openssh）把维护脚本打成 0700，dpkg-deb -R 原样解出后
+    # dpkg-deb -b 会拒绝重打包（要求 0555~0775），这里统一放宽到 0755
+    chmod 0755 "$x/DEBIAN" 2>/dev/null
+    for s in preinst postinst prerm postrm config; do
+        [ -f "$x/DEBIAN/$s" ] && chmod 0755 "$x/DEBIAN/$s"
+    done
 
     if ! mv "$x/data/data/com.termux" "$x/data/data/com.kimbox"; then
         log "目录改名失败，保留原 deb: $deb"
