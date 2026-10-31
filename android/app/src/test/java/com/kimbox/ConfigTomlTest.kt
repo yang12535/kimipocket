@@ -119,6 +119,54 @@ class ConfigTomlTest {
     }
 
     @Test
+    fun arrayTablesAreIsolatedFromPrecedingTable() {
+        val src = """
+            [providers.p]
+            type = "openai"
+
+            [[providers.p.headers]]
+            name = "x"
+
+            [[extra]]
+            type = "keep-me"
+            # 注释
+
+            [[extra]]
+            type = "keep-me-too"
+
+            [models."p/m"]
+            provider = "p"
+            model = "m"
+        """.trimIndent() + "\n"
+        val cfg = ConfigToml.parse(src)
+        assertEquals(src, cfg.toText())
+        assertEquals("openai", cfg.get(listOf("providers", "p"), "type"))
+        assertFalse(cfg.hasTable(listOf("extra")))
+        assertFalse(cfg.tablePaths().contains(listOf("extra")))
+        assertFalse(cfg.tablePaths().contains(listOf("providers", "p", "headers")))
+
+        // 改供应商只动它自己那段，数组表里的同名键不受影响
+        cfg.set(listOf("providers", "p"), "type", "anthropic")
+        cfg.set(listOf("providers", "p"), "base_url", "https://x/v1")
+        val edited = cfg.toText()
+        assertTrue(edited.contains("[providers.p]\ntype = \"anthropic\"\nbase_url = \"https://x/v1\"\n\n[[providers.p.headers]]"))
+        assertTrue(edited.contains("[[extra]]\ntype = \"keep-me\"\n# 注释\n\n[[extra]]\ntype = \"keep-me-too\""))
+        assertEquals("anthropic", Providers.load(ConfigToml.parse(edited)).single().type)
+
+        // 删供应商：连同它名下的数组表一起删，无关数组表原样保留
+        val again = ConfigToml.parse(edited)
+        Providers.delete(again, Providers.load(again).single())
+        assertEquals("""
+            [[extra]]
+            type = "keep-me"
+            # 注释
+
+            [[extra]]
+            type = "keep-me-too"
+        """.trimIndent() + "\n", again.toText())
+    }
+
+    @Test
     fun keyPathsWithQuotesAndDots() {
         assertEquals(listOf("models", "kimi-code/k3"), ConfigToml.parseKeyPath("models.\"kimi-code/k3\""))
         assertEquals(listOf("a", "b.c", "d"), ConfigToml.parseKeyPath("a.'b.c' . d"))

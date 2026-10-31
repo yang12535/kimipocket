@@ -5,12 +5,13 @@ package com.kimbox
  * （注释、空行、没见过的键、内联表都不碰）。
  *
  * 不是完整的 TOML 解析器：能读写的值只有 字符串 / 整数 / 布尔 / 字符串数组（数组可以跨行）；
- * 其他写法读出来是 null，但原文照样保留。不支持 [[数组表]] 的编辑（原样保留）。
+ * 其他写法读出来是 null，但原文照样保留。[[数组表]] 自成一段、不可读写（原样保留），
+ * 免得它的键被当成上一张表的。
  */
 class ConfigToml private constructor(private val sections: MutableList<Section>) {
 
-    /** path 为空表示文件开头、第一个表头之前的部分 */
-    private class Section(val path: List<String>, val lines: MutableList<String>)
+    /** path 为空表示文件开头、第一个表头之前的部分；array 为 [[数组表]] 的一个条目 */
+    private class Section(val path: List<String>, val lines: MutableList<String>, val array: Boolean = false)
 
     /** 一个键值在 Section.lines 里占的行区间 [start, end) */
     private class Entry(val key: String, val start: Int, val end: Int, val rawValue: String)
@@ -37,7 +38,7 @@ class ConfigToml private constructor(private val sections: MutableList<Section>)
                 }
                 val header = headerPath(line)
                 if (header != null) {
-                    sections.add(Section(header, mutableListOf(line)))
+                    sections.add(Section(header.first, mutableListOf(line), array = header.second))
                     continue
                 }
                 sections.last().lines.add(line)
@@ -54,11 +55,13 @@ class ConfigToml private constructor(private val sections: MutableList<Section>)
             return ConfigToml(sections)
         }
 
-        /** 表头行 → 路径；数组表 [[x]] 和非表头行返回 null */
-        private fun headerPath(line: String): List<String>? {
+        /** 表头行 → (路径, 是否数组表 [[x]])；非表头行返回 null */
+        private fun headerPath(line: String): Pair<List<String>, Boolean>? {
             val t = stripComment(line).trim()
-            if (!t.startsWith("[") || t.startsWith("[[") || !t.endsWith("]")) return null
-            return parseKeyPath(t.substring(1, t.length - 1).trim())
+            if (!t.startsWith("[") || !t.endsWith("]")) return null
+            val array = t.startsWith("[[") && t.endsWith("]]")
+            val inner = if (array) t.substring(2, t.length - 2) else t.substring(1, t.length - 1)
+            return parseKeyPath(inner.trim())?.let { it to array }
         }
 
         /** 解析 a."b.c".'d' 这样的点分键 */
@@ -284,10 +287,10 @@ class ConfigToml private constructor(private val sections: MutableList<Section>)
         return out
     }
 
-    private fun section(path: List<String>): Section? = sections.firstOrNull { it.path == path }
+    private fun section(path: List<String>): Section? = sections.firstOrNull { !it.array && it.path == path }
 
-    /** 所有表的路径（不含开头的无表头部分） */
-    fun tablePaths(): List<List<String>> = sections.mapNotNull { s -> s.path.takeIf { it.isNotEmpty() } }
+    /** 所有普通表的路径（不含开头的无表头部分和数组表） */
+    fun tablePaths(): List<List<String>> = sections.mapNotNull { s -> s.path.takeIf { it.isNotEmpty() && !s.array } }
 
     fun hasTable(path: List<String>): Boolean = section(path) != null
 
@@ -323,7 +326,7 @@ class ConfigToml private constructor(private val sections: MutableList<Section>)
         if (newLine != null) sec.lines.add(first.start, newLine)
     }
 
-    /** 删掉一张表；withChildren 时连同 path.* 的子表一起删 */
+    /** 删掉一张表；withChildren 时连同 path.* 的子表（含 [[path.x]] 数组表）一起删 */
     fun removeTable(path: List<String>, withChildren: Boolean = true) {
         sections.removeAll { s ->
             s.path.isNotEmpty() && (s.path == path ||
