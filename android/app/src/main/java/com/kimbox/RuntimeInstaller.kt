@@ -24,7 +24,7 @@ object RuntimeInstaller {
     // home/ 种子文件版本号：当种子内容变化时 +1，触发已装机型的覆盖更新（仅限用户未修改的文件）。
     // 覆盖决策唯一依据：磁盘文件哈希 ∈ KNOWN_SEED_HASHES（已知官方发布哈希集合）。
     // .seedhash 文件仅作诊断参考，不作为覆盖授权依据。
-    private const val SEED_VERSION = 6
+    private const val SEED_VERSION = 7
 
     /**
      * 已知官方种子哈希表：path → 该文件在所有历史发布版中的 SHA-256 集合。
@@ -56,6 +56,8 @@ object RuntimeInstaller {
             "34e04579e56ee956eeca44ec6c02b1347e6972fdce6dff2cc5a1bff85840aa12",
             // v0.2.4
             "ca8f690b4b65003bfa54a89125b6136825ac1a2059d1f23e3cda806639fbbcde",
+            // v0.3.0（设置入口改成悬浮按钮）
+            "fb67fb8ebf99de0a9d2ac792370ed9a7d4bc3b268c7291352fbd369262db1561",
         ),
     )
 
