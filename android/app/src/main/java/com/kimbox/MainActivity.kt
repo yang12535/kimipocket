@@ -385,16 +385,26 @@ class MainActivity : Activity() {
             })
 
         val notifications = getSystemService(android.app.NotificationManager::class.java)
+        TaskCompletionMonitor.ensureChannel(this)
         val resultChannel = notifications.getNotificationChannel(TaskCompletionMonitor.CHANNEL)
         val notificationEnabled = notifications.areNotificationsEnabled() && resultChannel?.importance != android.app.NotificationManager.IMPORTANCE_NONE
+        val notificationLabel = when {
+            !notificationEnabled -> "已关闭"
+            (resultChannel?.importance ?: 0) < android.app.NotificationManager.IMPORTANCE_DEFAULT -> "静默"
+            (resultChannel?.importance ?: 0) < android.app.NotificationManager.IMPORTANCE_HIGH -> "普通提醒"
+            else -> "高优先级"
+        }
         val granted = isStoragePermissionGranted()
         sheet.group("权限",
-            Ui.row(this, p, "◉", "任务完成通知", "完成或失败时提醒，点通知回到会话", inCard = true,
-                trailingView = Ui.pill(this, p, if (notificationEnabled) "已开启" else "已关闭",
+            Ui.row(this, p, "◉", "任务完成通知", "点此设置声音、振动与悬浮通知", inCard = true,
+                trailingView = Ui.pill(this, p, notificationLabel,
                     if (notificationEnabled) p.ok else p.sub)) {
                 sheet.dismiss()
-                startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName))
+                val action = if (notifications.areNotificationsEnabled()) android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS
+                    else android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                startActivity(Intent(action)
+                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+                    .putExtra(android.provider.Settings.EXTRA_CHANNEL_ID, TaskCompletionMonitor.CHANNEL))
             },
             Ui.row(this, p, "▣", "手机存储", "读写下载、相册等公共目录", inCard = true,
                 trailingView = Ui.pill(this, p, if (granted) "已开启" else "去开启",

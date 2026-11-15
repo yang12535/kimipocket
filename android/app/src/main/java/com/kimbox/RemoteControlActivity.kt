@@ -9,6 +9,8 @@ import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
@@ -25,6 +27,12 @@ class RemoteControlActivity : Activity() {
     private lateinit var colors: Ui.Palette
     private var pendingAuthorizationUrl: String? = null
     private var authorizationSheet: Ui.Sheet? = null
+    private var authorizationStatus: TextView? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private var resumed = false
+    private var authorizationStartedAt = 0L
+    private var authorizationGeneration = 0
+    private val authorizationPoll = Runnable { checkAuthorization() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,6 +55,7 @@ class RemoteControlActivity : Activity() {
         colors = if (intent.getBooleanExtra("dark", systemDark)) Ui.DARK else Ui.LIGHT
         applyPalette(colors)
         pendingAuthorizationUrl = savedInstanceState?.getString("pending_authorization_url")
+        authorizationStartedAt = savedInstanceState?.getLong("authorization_started_at") ?: 0L
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -81,7 +90,10 @@ class RemoteControlActivity : Activity() {
             setPadding(dp(12), dp(7), dp(12), dp(7))
         }
         bar.addView(address, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
-        bar.addView(barButton("↻", "刷新") { web.reload() }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        bar.addView(barButton("↻", "刷新") {
+            clearAuthorization()
+            web.reload()
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
         root.addView(bar)
         root.addView(View(this).apply { setBackgroundColor(colors.divider) }, LinearLayout.LayoutParams(-1, 1))
         web = WebView(this)
@@ -102,7 +114,8 @@ class RemoteControlActivity : Activity() {
                 if (request.isForMainFrame && uri.scheme == "https" && uri.userInfo == null &&
                     uri.port in setOf(-1, 443)
                 ) {
-                    showAuthorizationHandoff(uri.toString(), launch = true)
+                    if (isAuthorizationUrl(uri)) showAuthorizationHandoff(uri.toString(), launch = true)
+                    else openBrowser(uri.toString())
                     return true
                 }
                 if (request.isForMainFrame && request.hasGesture() && uri.scheme in listOf("http", "mailto")) {
@@ -114,6 +127,7 @@ class RemoteControlActivity : Activity() {
             override fun onPageFinished(view: WebView, url: String) {
                 address.text = "🔒 " + Uri.parse(url).host.orEmpty()
                 CookieManager.getInstance().flush()
+                scheduleAuthorizationCheck(0)
             }
         }
         root.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -123,10 +137,20 @@ class RemoteControlActivity : Activity() {
     }
 
     private fun showAuthorizationHandoff(url: String, launch: Boolean) {
+        if (pendingAuthorizationUrl != url || authorizationStartedAt == 0L) {
+            authorizationStartedAt = System.currentTimeMillis()
+        }
+        authorizationGeneration++
         pendingAuthorizationUrl = url
         authorizationSheet?.dismiss()
-        val sheet = Ui.Sheet(this, colors, "在外部浏览器中授权",
-            "OAuth 已离开内置页面。请在外部浏览器完成授权，然后返回这里刷新远程页面。")
+        val sheet = Ui.Sheet(this, colors, "在浏览器中完成登录",
+            "请在外部浏览器完成授权；返回后会自动检查登录状态。")
+        authorizationStatus = TextView(this).apply {
+            text = "等待授权完成…"
+            textSize = 13f
+            setTextColor(colors.sub)
+        }
+        sheet.add(authorizationStatus!!, topMarginDp = 10)
         sheet.add(TextView(this).apply {
             text = url
             textSize = 12.5f
@@ -142,18 +166,102 @@ class RemoteControlActivity : Activity() {
             Ui.button(this, colors, "复制 URL", primary = false) { copyLink(url) },
             Ui.button(this, colors, "打开授权页", primary = true) { openBrowser(url) }
         ))
-        sheet.addFooter(Ui.button(this, colors, "我已完成授权，刷新页面", primary = false) {
-            pendingAuthorizationUrl = null
-            authorizationSheet = null
-            sheet.dismiss()
-            web.loadUrl(entryUrl)
+        sheet.addFooter(Ui.button(this, colors, "检查授权状态", primary = false) {
+            authorizationStatus?.text = "正在检查登录状态…"
+            scheduleAuthorizationCheck(0)
         })
         authorizationSheet = sheet
         sheet.dialog.setOnDismissListener {
-            if (authorizationSheet === sheet) authorizationSheet = null
+            if (authorizationSheet === sheet) {
+                authorizationSheet = null
+                authorizationStatus = null
+            }
         }
         sheet.show()
+        scheduleAuthorizationCheck(0)
         if (launch) openBrowser(url)
+    }
+
+    private fun scheduleAuthorizationCheck(delay: Long = 1500L) {
+        handler.removeCallbacks(authorizationPoll)
+        if (resumed && pendingAuthorizationUrl != null && !isFinishing && !isDestroyed) {
+            handler.postDelayed(authorizationPoll, delay)
+        }
+    }
+
+    private fun clearAuthorization() {
+        handler.removeCallbacks(authorizationPoll)
+        authorizationGeneration++
+        pendingAuthorizationUrl = null
+        authorizationStartedAt = 0L
+        val sheet = authorizationSheet
+        authorizationSheet = null
+        authorizationStatus = null
+        sheet?.dismiss()
+    }
+
+    private fun checkAuthorization() {
+        if (!resumed || pendingAuthorizationUrl == null || !::web.isInitialized) return
+        if (System.currentTimeMillis() - authorizationStartedAt > 30 * 60 * 1000L) {
+            clearAuthorization()
+            toast("授权等待已结束，请在设备页重新登录")
+            return
+        }
+        val current = web.url.orEmpty()
+        if (!validEntry(current)) { scheduleAuthorizationCheck(); return }
+        val generation = authorizationGeneration
+        val origin = "https://${Uri.parse(current).host}"
+        // The RC page alone performs device-token polling and exchanges its token for a
+        // same-origin cookie. Observe only the resulting boolean; never move credentials
+        // into native code or reload the page while its pending device code lives in JS.
+        web.evaluateJavascript("""
+            (() => {
+              if (location.origin !== '$origin') return 'unknown';
+              let p = window.__kimboxAuthorizationProbe;
+              if (!p || p.generation !== $generation) {
+                p = {generation: $generation, result: 'pending', busy: false};
+                window.__kimboxAuthorizationProbe = p;
+              }
+              if (p.result === 'authorized') return p.result;
+              const error = document.querySelector('.err-text');
+              if (error && error.textContent.trim()) return 'ended';
+              const result = p.result;
+              if (!p.busy) {
+                p.busy = true;
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 5000);
+                fetch('/auth/me', {credentials: 'same-origin', cache: 'no-store',
+                    redirect: 'error', signal: controller.signal})
+                  .then(r => {
+                    if (r.status === 401 || r.status === 403) return null;
+                    if (!r.ok || !(r.headers.get('content-type') || '').includes('application/json')) throw new Error();
+                    return r.json();
+                  })
+                  .then(j => { p.result = j && typeof j.user_id === 'string' && j.user_id.trim() ? 'authorized' : 'pending'; })
+                  .catch(() => { p.result = 'network_error'; })
+                  .finally(() => { clearTimeout(timeout); p.busy = false; });
+              }
+              return result;
+            })()
+        """.trimIndent()) { result ->
+            if (generation != authorizationGeneration || pendingAuthorizationUrl == null || !resumed) return@evaluateJavascript
+            when (result) {
+                "\"authorized\"" -> {
+                    CookieManager.getInstance().flush()
+                    clearAuthorization()
+                    toast("远程控制已登录")
+                }
+                "\"ended\"" -> {
+                    clearAuthorization()
+                    toast("本次授权已结束，请在设备页查看提示或重新登录")
+                }
+                else -> {
+                    authorizationStatus?.text = if (result == "\"network_error\"")
+                        "暂时无法检查，网络恢复后会自动重试" else "等待授权完成，状态会自动更新…"
+                    scheduleAuthorizationCheck()
+                }
+            }
+        }
     }
 
     private fun openBrowser(url: String) {
@@ -177,11 +285,20 @@ class RemoteControlActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("pending_authorization_url", pendingAuthorizationUrl)
+        outState.putLong("authorization_started_at", authorizationStartedAt)
         if (::web.isInitialized) web.saveState(outState)
         super.onSaveInstanceState(outState)
     }
 
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        scheduleAuthorizationCheck(0)
+    }
+
     override fun onPause() {
+        resumed = false
+        handler.removeCallbacks(authorizationPoll)
         if (::web.isInitialized) CookieManager.getInstance().flush()
         super.onPause()
     }
@@ -192,8 +309,7 @@ class RemoteControlActivity : Activity() {
     }
 
     override fun onDestroy() {
-        authorizationSheet?.dismiss()
-        authorizationSheet = null
+        clearAuthorization()
         if (::web.isInitialized) {
             web.stopLoading()
             web.destroy()
@@ -215,6 +331,10 @@ class RemoteControlActivity : Activity() {
 
     companion object {
         private var profileInitialized = false
+
+        private fun isAuthorizationUrl(uri: Uri): Boolean =
+            uri.host in setOf("www.kimi.com", "kimi.com", "www.kimi.ai", "kimi.ai") &&
+                uri.path == "/code/authorize_device"
 
         fun validEntry(url: String): Boolean {
             val uri = Uri.parse(url)

@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.net.Uri
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -29,7 +31,10 @@ class TaskCompletionMonitor(private val context: Context, private val port: Int)
     private var socket: WebSocket? = null
     private var retrySeconds = 1L
 
-    fun start() { executor.execute { connect() } }
+    fun start() {
+        ensureChannel(context)
+        executor.execute { connect() }
+    }
 
     private fun connect() {
         if (closed || !KimiState.running || KimiState.port != port) return
@@ -113,7 +118,7 @@ class TaskCompletionMonitor(private val context: Context, private val port: Int)
     private fun notifyFinished(id: String, reason: String) {
         if (closed) return
         val nm = context.getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CHANNEL, "任务结果", NotificationManager.IMPORTANCE_DEFAULT))
+        ensureChannel(context)
         val intent = Intent(context, MainActivity::class.java)
             .setAction(ACTION_OPEN_SESSION)
             .setData(Uri.parse("kimbox://session/$id"))
@@ -121,11 +126,11 @@ class TaskCompletionMonitor(private val context: Context, private val port: Int)
         val pending = PendingIntent.getActivity(context, 0, intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val notification = Notification.Builder(context, CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
             .setContentTitle(if (reason == "completed") "Kimi 任务已完成" else "Kimi 任务未能完成")
             .setContentText("点此返回对应会话查看结果")
             .setContentIntent(pending).setAutoCancel(true)
-            .setVisibility(Notification.VISIBILITY_PRIVATE).setCategory(Notification.CATEGORY_STATUS).build()
+            .setVisibility(Notification.VISIBILITY_PRIVATE).setCategory(Notification.CATEGORY_MESSAGE).build()
         // Stable tag prevents hash collisions between sessions and keeps one result per conversation.
         nm.notify(id, 2, notification)
     }
@@ -143,8 +148,23 @@ class TaskCompletionMonitor(private val context: Context, private val port: Int)
     }
 
     companion object {
-        const val CHANNEL = "kimi_task_results"
+        // Android cannot raise an existing channel's importance. Migrate the old DEFAULT
+        // task-results channel once; later user changes to this new channel remain respected.
+        const val CHANNEL = "kimi_task_messages"
         const val ACTION_OPEN_SESSION = "com.kimbox.action.OPEN_SESSION"
         const val EXTRA_SESSION = "session_id"
+
+        fun ensureChannel(context: Context) {
+            val channel = NotificationChannel(CHANNEL, "任务消息", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "任务完成或失败时提醒；声音、振动和悬浮通知可在此单独设置"
+                enableVibration(true)
+                setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+                lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+            }
+            context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
     }
 }
