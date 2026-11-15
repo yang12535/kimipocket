@@ -3,63 +3,221 @@
 # 两个名字同为 10 字符，内容与 tar 路径都可等长替换——与本项目 patch_runtime.py 同一思路。
 # apt 在下载时已按签名索引校验过 deb 哈希，此处重写发生在校验之后，不影响安全性。
 #
-# 设计要点：
-# - 不用 set -e：单 deb 内单文件失败只记日志跳过该文件（由 node 汇总）；某 deb 任一
-#   环节失败则整体跳过该 deb（保留原 deb 不动，让 dpkg 后续响亮失败），绝不中止整个
-#   apt 事务。
-# - 每个 deb 只起一个 node 进程扫描+重写整棵树（文件列表以 NUL 分隔经 stdin 喂入），
-#   node 内先分块扫描 com.termux 字节串、命中才读全文件替换写回，未命中文件零写开销。
-# - 临时目录用 trap 兜底清理（CUR_TMP 全局登记，EXIT/INT/TERM 都触发）。
-# - 循环体内可能读 stdin 的命令（dpkg-deb 等）统一 </dev/null，防止吃掉 apt 喂进来
-#   的 deb 列表。
+# 设计要点（issue #26 整理）：
+# - 安全失败：凡是含 data/data/com.termux 的 deb，解包/重写/重打包/校验任一步失败都 exit 1，
+#   让 apt 中止本次安装（预安装钩子失败时 dpkg 还没解包任何东西），绝不把没重写的 termux deb
+#   放行。不含该前缀的 deb（与本应用无关）原样放行。
+# - 信号：INT/TERM/HUP 会直接 KILL 当前子进程组（压缩器/node 及其后代），wait 回收后
+#   删临时文件并立即退出；不用 TERM 宽限，也不起定时 KILL 看门狗（PID 复用误杀窗口）。
+# - 只在安装 deb 前由 dpkg 调用；`apt update` 不经过本钩子，更新慢/卡住不是这里能修的。
+# - stdin：apt 用 stdin 传 deb 列表。先把列表落到临时文件、再把 fd0 改接到 /dev/null，
+#   循环体里任何子进程都不可能读到 apt 的管道（旧版逐个 </dev/null 兜，漏一个就吃掉列表或阻塞）。
+#   stdin 是终端（手工执行）时直接退出，不等人输入。
+# - 性能与内存：node 侧单遍分块扫描 + 按块合并写回（不逐命中 10 字节 writeSync，短写会补齐；
+#   不再整文件读进内存）；md5sums 只重算内容变了的文件（不再整棵树重算）；重打包沿用原 deb
+#   的压缩算法，并让 dpkg-deb 多线程压缩。每个 deb 打一行进度到 stderr，apt 会实时显示。
 set -u
 # 解包出来的 DEBIAN/ 与数据目录要能被 dpkg-deb -b 接受（0755~0775），别继承调用方的 077 之类
 umask 022
+
 # KIMBOX_PREFIX 仅供 PC 侧测试覆盖，设备上走默认绝对前缀。
 P=${KIMBOX_PREFIX:-/data/data/com.kimbox/files/usr}
-export PATH="$P/bin" LD_LIBRARY_PATH="$P/lib" LD_PRELOAD="$P/lib/libtermux-exec.so" TMPDIR="$P/tmp"
+export PATH="$P/bin"
+export LD_LIBRARY_PATH="$P/lib"
+# termux-exec 是设备上跑 shebang 的关键；PC 侧测试没有这个库，缺了就别 export，免得链接器报警
+if [ -f "$P/lib/libtermux-exec.so" ]; then
+    export LD_PRELOAD="$P/lib/libtermux-exec.so"
+fi
+TMPDIR="$P/tmp"
+export TMPDIR
 
-NODE_REWRITE="$P/libexec/kimbox-deb-rewrite.js"
+NODE_SCRIPT="$P/libexec/kimbox-deb-rewrite.js"
 
-log() { echo "kimbox-deb-rewrite: $*" >&2; }
+# 保留一份原始 stderr：信号处理可能发生在某条命令的 2>重定向窗口里，
+# 那时 fd2 指向的是临时文件，日志就丢了。
+exec 9>&2
+log() { printf 'kimbox-deb-rewrite: %s\n' "$*" >&9; }
 
+LIST_FILE=
 CUR_TMP=
-cleanup() {
+CUR_NEW=
+CUR_CHILD=
+HAVE_NODE=0
+DEB_ROOT_OWNER=0
+DEB_THREADS=0
+
+cleanup_deb() {
     if [ -n "$CUR_TMP" ]; then
         rm -rf "$CUR_TMP" 2>/dev/null
         CUR_TMP=
     fi
+    if [ -n "$CUR_NEW" ]; then
+        rm -f "$CUR_NEW" 2>/dev/null
+        CUR_NEW=
+    fi
 }
-trap cleanup EXIT INT TERM
 
-# node 不可用时无法重写：全部 deb 保持原样，交给 dpkg 响亮失败。
-if [ ! -x "$P/bin/node" ] || [ ! -f "$NODE_REWRITE" ]; then
-    log "node 或 $NODE_REWRITE 缺失，所有 deb 原样放行"
-    exit 0
-fi
-# 裸跑 apt 时 usr/tmp 可能还没建出来，兜底一下
-[ -d "$P/tmp" ] || mkdir -p "$P/tmp" 2>/dev/null
+cleanup() {
+    cleanup_deb
+    if [ -n "$LIST_FILE" ]; then
+        rm -f "$LIST_FILE" 2>/dev/null
+        LIST_FILE=
+    fi
+}
 
-while IFS= read -r deb; do
-    case "$deb" in *.deb) ;; *) continue ;; esac
-    [ -f "$deb" ] || continue
+# 信号：直接 KILL 当前子进程组，再 wait 回收，立刻退出。
+# 这里只有临时解包/压缩进程，不需要温柔退出；子进程若忽略 TERM，无界 wait 会永久卡住。
+# 不走 (sleep 5; kill -KILL) 看门狗，也就没有 PID 复用的误杀窗口。
+# shellcheck disable=SC2317  # 只经 trap 调用
+on_signal() {
+    local name=$1 code=$2 pid
+    log "收到 SIG$name：停止处理，放弃本次安装（未重写的 deb 不会交给 dpkg）"
+    if [ -n "$CUR_CHILD" ]; then
+        pid=$CUR_CHILD
+        CUR_CHILD=
+        # 子进程由 run_child 放进独立进程组：KILL 整个组，连带 dpkg-deb/xz/node 的后代。
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+    fi
+    cleanup
+    exit "$code"
+}
 
-    if ! CUR_TMP=$(mktemp -d "$P/tmp/debrew.XXXXXX"); then
-        log "mktemp 失败，跳过: $deb"
-        continue
+abort() {
+    log "$*"
+    log "已中止本次安装：apt 会因钩子返回错误而整体放弃，未重写的 deb 不会被解包"
+    cleanup
+    exit 1
+}
+
+# 前台子进程登记。开启 job control 让子进程成为独立进程组组长，信号处理时
+# 可以按组取消（$! 同时是 pid 和 pgid）；否则只杀组长，压缩器等后代还会活着。
+run_child() {
+    local rc
+    set -m
+    "$@" &
+    CUR_CHILD=$!
+    set +m
+    wait "$CUR_CHILD"
+    rc=$?
+    CUR_CHILD=
+    return "$rc"
+}
+
+# dpkg-deb 的能力探测（决定要不要加 --root-owner-group / 多线程压缩参数）
+probe_capabilities() {
+    local help
+    help=$(dpkg-deb --help 2>&1) || help=
+    case $help in
+        *--root-owner-group*) DEB_ROOT_OWNER=1 ;;
+    esac
+    case $help in
+        *--threads-max*) DEB_THREADS=1 ;;
+    esac
+}
+
+# 读 ar 成员名判断原 deb 的 data.tar 压缩方式，重打包时沿用；判断不出来就用 dpkg-deb 默认
+deb_compressor() {
+    local f=$1 magic hdr off=8 name size i=0
+    magic=$(dd if="$f" bs=1 count=8 2>/dev/null) || return 1
+    [ "$magic" = "!<arch>" ] || return 1
+    while [ "$i" -lt 8 ]; do
+        i=$((i + 1))
+        hdr=$(dd if="$f" bs=1 skip="$off" count=60 2>/dev/null) || return 1
+        # 成员头末尾是 "`\n"，命令替换会把换行吃掉，正常长度是 59
+        [ "${#hdr}" -ge 58 ] || return 1
+        name=${hdr:0:16}
+        name=${name%% *}
+        name=${name%/}
+        case $name in
+            data.tar) printf 'none\n'; return 0 ;;
+            data.tar.xz) printf 'xz\n'; return 0 ;;
+            data.tar.gz) printf 'gzip\n'; return 0 ;;
+            data.tar.bz2) printf 'bzip2\n'; return 0 ;;
+            data.tar.lzma) printf 'lzma\n'; return 0 ;;
+            data.tar.zst) printf 'zstd\n'; return 0 ;;
+        esac
+        size=${hdr:48:10}
+        size=${size// /}
+        case $size in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        size=$((10#$size))
+        off=$((off + 60 + size + size % 2))
+    done
+    return 1
+}
+
+build_deb() {
+    local src=$1 out=$2 comp=$3
+    local -a opts=(-b)
+    case $comp in
+        xz|gzip|bzip2|lzma|zstd|none) opts+=("-Z$comp") ;;
+    esac
+    [ "$DEB_ROOT_OWNER" -eq 1 ] && opts+=(--root-owner-group)
+    [ "$DEB_THREADS" -eq 1 ] && opts+=(--threads-max=4)
+    run_child dpkg-deb "${opts[@]}" "$src" "$out" </dev/null
+}
+
+# 只用原压缩格式重试，去掉 --root-owner-group / --threads-max 等可选参数。
+# 绝不退回 dpkg-deb 默认压缩：那会悄悄把 data.tar 从原格式换成 xz。
+build_deb_minimal() {
+    local src=$1 out=$2 comp=$3
+    local -a opts=(-b)
+    [ -n "$comp" ] && opts+=("-Z$comp")
+    run_child dpkg-deb "${opts[@]}" "$src" "$out" </dev/null
+}
+
+# 校验重打包产物：控制区能读、路径里不再有 com.termux、且 com.kimbox 前缀在场
+verify_deb() {
+    local f=$1 toc
+    dpkg-deb -I "$f" >/dev/null 2>&1 || return 1
+    toc=$(dpkg-deb -c "$f" 2>/dev/null) || return 1
+    case $toc in
+        *com.termux*) return 1 ;;
+    esac
+    case $toc in
+        *"data/data/com.kimbox/"*) return 0 ;;
+    esac
+    return 1
+}
+
+process_deb() {
+    local idx=$1 total=$2 deb=$3
+    local name t0 comp x t mode
+    local -a nargs
+    name=$(basename -- "$deb")
+    t0=$SECONDS
+    # 尽量保留原 deb 的文件模式（apt 缓存通常是 0644；别自作主张放宽权限）
+    mode=$(stat -c %a "$deb" 2>/dev/null) || mode=
+
+    if ! CUR_TMP=$(mktemp -d "$TMPDIR/debrew.XXXXXX"); then
+        CUR_TMP=
+        abort "[$idx/$total] 建临时目录失败（$TMPDIR 可写吗？）: $deb"
     fi
     x="$CUR_TMP/x"
 
-    if ! dpkg-deb -R "$deb" "$x" </dev/null 2>"$CUR_TMP/extract.err"; then
-        log "解包失败，保留原 deb: $deb ($(head -c 200 "$CUR_TMP/extract.err"))"
-        cleanup
-        continue
+    log "[$idx/$total] 解包 $name"
+    if ! run_child dpkg-deb -R "$deb" "$x" 2>"$CUR_TMP/extract.err" </dev/null; then
+        t=$(head -c 300 "$CUR_TMP/extract.err" 2>/dev/null | tr '\n' ' ')
+        abort "[$idx/$total] 解包失败（原 deb 未动）: $deb ${t}"
     fi
 
     # 不含 com.termux 目录树的 deb 与本应用前缀无关，原样放行
+    if [ ! -e "$x/data/data/com.termux" ] && [ ! -L "$x/data/data/com.termux" ]; then
+        log "[$idx/$total] 不含 com.termux 前缀，原样放行 $name"
+        cleanup_deb
+        return 0
+    fi
+    # 存在但不是目录（普通文件/符号链接）：无法安全改名，绝不原样放行
     if [ ! -d "$x/data/data/com.termux" ]; then
-        cleanup
-        continue
+        abort "[$idx/$total] data/data/com.termux 不是目录，无法安全重写: $deb"
+    fi
+    if [ -e "$x/data/data/com.kimbox" ] || [ -L "$x/data/data/com.kimbox" ]; then
+        abort "[$idx/$total] deb 内同时存在 com.termux 与 com.kimbox，无法确定重写结果: $deb"
+    fi
+    if [ "$HAVE_NODE" -eq 0 ]; then
+        abort "[$idx/$total] 缺少 node 或 $NODE_SCRIPT，无法重写 $name：请先修复运行时（重装 runtime/APK）再重试"
     fi
 
     # 上游有的 deb（如 openssh）把维护脚本打成 0700，dpkg-deb -R 原样解出后
@@ -70,55 +228,138 @@ while IFS= read -r deb; do
     done
 
     if ! mv "$x/data/data/com.termux" "$x/data/data/com.kimbox"; then
-        log "目录改名失败，保留原 deb: $deb"
-        cleanup
-        continue
+        abort "[$idx/$total] 目录改名失败（原 deb 未动）: $deb"
     fi
 
-    # 符号链接目标重写；-print0 / read -d '' + IFS= 保住含空白/特殊字符的名字
-    find "$x" -type l -print0 | while IFS= read -r -d '' l; do
-        t=$(readlink "$l")
-        case "$t" in
+    # 符号链接目标重写；先把链接列表落文件，再在当前 shell 里读，避免管道子 shell
+    # 吞掉 ln/readlink 的退出码。任何一条重写失败都中止，不带着错链接去重打包。
+    if ! find "$x" -type l -print0 > "$CUR_TMP/links.list" 2>/dev/null; then
+        abort "[$idx/$total] 枚举符号链接失败（原 deb 未动）: $deb"
+    fi
+    while IFS= read -r -d '' l; do
+        t=$(readlink "$l") || abort "[$idx/$total] 读取符号链接失败（原 deb 未动）: $l"
+        case $t in
             *com.termux*)
                 ln -snf "${t//com.termux/com.kimbox}" "$l" \
-                    || log "符号链接重写失败（跳过）: $l"
+                    || abort "[$idx/$total] 符号链接重写失败（原 deb 未动）: $l"
                 ;;
         esac
-    done
+    done < "$CUR_TMP/links.list"
 
-    # 文件内容重写：单个 node 进程处理整棵树；任一文件失败 -> node 退出非零 -> 放弃该 deb
-    if ! find "$x" -type f -print0 > "$CUR_TMP/files.list"; then
-        log "枚举文件失败，保留原 deb: $deb"
-        cleanup
-        continue
-    fi
-    if ! "$P/bin/node" "$NODE_REWRITE" < "$CUR_TMP/files.list"; then
-        log "内容重写有文件失败，保留原 deb: $deb"
-        cleanup
-        continue
+    if ! find "$x" -type f -print0 > "$CUR_TMP/files.list" 2>/dev/null; then
+        abort "[$idx/$total] 枚举文件失败（原 deb 未动）: $deb"
     fi
 
-    # md5sums：目录已改名（条目路径全变）且被改写文件内容已变，逐条修补不可靠，
-    # 选择从整棵树重新生成（md5sum 输出格式即 dpkg 约定格式，DEBIAN/ 自身不入列）；
-    # 重算失败则直接删掉该文件——md5sums 在 deb 里是可选的，缺失不影响 dpkg 安装。
+    nargs=("$NODE_SCRIPT" --label "$name" --list "$CUR_TMP/files.list")
     if [ -f "$x/DEBIAN/md5sums" ]; then
-        if ( cd "$x" && find . -path ./DEBIAN -prune -o -type f -print0 | LC_ALL=C sort -z | xargs -0 md5sum ) > "$CUR_TMP/md5sums" 2>/dev/null; then
-            cp "$CUR_TMP/md5sums" "$x/DEBIAN/md5sums"
-        else
-            log "md5sums 重算失败，改为删除: $deb"
-            rm -f "$x/DEBIAN/md5sums"
+        nargs+=(--md5sums "$x/DEBIAN/md5sums")
+    fi
+    log "[$idx/$total] 重写文件内容 $name"
+    if ! run_child node "${nargs[@]}" </dev/null; then
+        abort "[$idx/$total] 内容重写失败（原 deb 未动）: $deb"
+    fi
+
+    comp=$(deb_compressor "$deb") || comp=
+
+    CUR_NEW="$deb.kimbox-new.$$"
+    log "[$idx/$total] 重打包 $name（${comp:-dpkg-deb 默认压缩}）"
+    if ! build_deb "$x" "$CUR_NEW" "$comp" 2>"$CUR_TMP/build.err"; then
+        t=$(head -c 300 "$CUR_TMP/build.err" 2>/dev/null | tr '\n' ' ')
+        rm -f "$CUR_NEW"
+        log "[$idx/$total] 重打包失败（${t}），用原压缩格式（${comp:-dpkg-deb 默认}）重试 $name"
+        # 只去掉可选参数，压缩格式必须仍是原格式；格式不支持就安全失败，不偷偷换格式。
+        if ! build_deb_minimal "$x" "$CUR_NEW" "$comp" 2>"$CUR_TMP/build.err"; then
+            t=$(head -c 300 "$CUR_TMP/build.err" 2>/dev/null | tr '\n' ' ')
+            rm -f "$CUR_NEW"
+            CUR_NEW=
+            abort "[$idx/$total] 重打包失败（${t}），原 deb 未动: $deb"
         fi
     fi
 
-    if dpkg-deb -b "$x" "$deb.new" </dev/null >/dev/null 2>&1; then
-        if ! mv -f "$deb.new" "$deb"; then
-            log "原子替换失败，原 deb 未动: $deb"
-            rm -f "$deb.new"
-        fi
-    else
-        rm -f "$deb.new"   # 清掉可能残留的半截 .new
-        log "重打包失败，保留原 deb: $deb"
+    if ! verify_deb "$CUR_NEW"; then
+        rm -f "$CUR_NEW"
+        CUR_NEW=
+        abort "[$idx/$total] 重打包结果校验不通过（仍有 com.termux 或缺 com.kimbox），原 deb 未动: $deb"
     fi
-    cleanup
+
+    if [ -n "$mode" ]; then
+        chmod "$mode" "$CUR_NEW" 2>/dev/null
+    fi
+    if ! mv -f "$CUR_NEW" "$deb"; then
+        rm -f "$CUR_NEW"
+        CUR_NEW=
+        abort "[$idx/$total] 原子替换失败（原 deb 未动）: $deb"
+    fi
+    CUR_NEW=
+    cleanup_deb
+    log "[$idx/$total] 完成 $name（$((SECONDS - t0))s）"
+}
+
+# ── 主流程 ───────────────────────────────────────────────────────
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
+trap cleanup EXIT
+
+# apt 用 stdin 传 deb 路径列表（每行一个）。手工执行时 stdin 是终端，直接退出不等人输入。
+if [ -t 0 ]; then
+    log "stdin 是终端（不是 apt 调用），无事可做"
+    exit 0
+fi
+
+if [ ! -d "$TMPDIR" ]; then
+    mkdir -p "$TMPDIR" 2>/dev/null || abort "临时目录不可用: $TMPDIR"
+fi
+if ! LIST_FILE=$(mktemp "$TMPDIR/debrew-list.XXXXXX"); then
+    LIST_FILE=
+    abort "无法在 $TMPDIR 建临时文件"
+fi
+
+total=0
+while IFS= read -r deb; do
+    [ -n "$deb" ] || continue
+    # 列表写失败会让后面的 deb 收不到处理，等于放行未重写的包；必须中止。
+    if ! printf '%s\n' "$deb" >> "$LIST_FILE"; then
+        abort "写临时列表失败（$TMPDIR 可写吗？）: $LIST_FILE"
+    fi
+    case $deb in
+        *.deb) total=$((total + 1)) ;;
+    esac
 done
+exec 0</dev/null
+
+if [ "$total" -eq 0 ]; then
+    log "本次没有待安装的 deb，跳过"
+    exit 0
+fi
+
+if ! command -v dpkg-deb >/dev/null 2>&1; then
+    abort "找不到 dpkg-deb（PATH=$PATH），无法判断/重写 deb 内的 com.termux 路径"
+fi
+probe_capabilities
+if command -v node >/dev/null 2>&1 && [ -f "$NODE_SCRIPT" ]; then
+    HAVE_NODE=1
+else
+    log "警告：缺少 node 或 $NODE_SCRIPT；含 com.termux 的 deb 会被拒绝安装"
+fi
+
+log "处理 $total 个 deb（apt 预安装钩子）"
+
+idx=0
+if ! exec 3< "$LIST_FILE"; then
+    abort "无法打开临时列表: $LIST_FILE"
+fi
+while IFS= read -r -u 3 deb; do
+    case $deb in
+        *.deb) ;;
+        *) continue ;;
+    esac
+    idx=$((idx + 1))
+    if [ ! -f "$deb" ]; then
+        log "[$idx/$total] 文件不存在，跳过: $deb"
+        continue
+    fi
+    process_deb "$idx" "$total" "$deb"
+done
+exec 3<&-
 exit 0

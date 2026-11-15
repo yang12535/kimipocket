@@ -1,0 +1,106 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #111114;
+  color: #e6e6e6;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: -apple-system, "Noto Sans CJK SC", "PingFang SC", sans-serif;
+}
+
+#app {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+#terminal {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px 0 0 6px;
+  overflow: hidden;
+}
+
+#terminal .xterm {
+  height: 100%;
+}
+
+#terminal .xterm-viewport {
+  background: #111114 !important;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+#status {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 58px;
+  z-index: 5;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid #3a3a42;
+  background: rgba(40, 40, 48, 0.96);
+  color: #f4f4f5;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  pointer-events: none;
+}
+
+#status.persist {
+  border-color: #7a5c2e;
+  background: rgba(58, 45, 20, 0.97);
+}
+
+#keys {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+  background: #18181c;
+  border-top: 1px solid #2a2a30;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+#keys::-webkit-scrollbar {
+  display: none;
+}
+
+#keys.disabled {
+  opacity: 0.45;
+}
+
+#keys button {
+  flex: 0 0 auto;
+  min-width: 44px;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid #3a3a42;
+  border-radius: 8px;
+  background: #26262c;
+  color: #e6e6e6;
+  font-family: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#keys button:active {
+  background: #3a3a44;
+}

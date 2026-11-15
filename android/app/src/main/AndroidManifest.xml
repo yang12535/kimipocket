@@ -33,6 +33,20 @@
             </intent-filter>
         </activity>
 
+        <!-- 拍照临时文件的出口：只放行 cache 里专用的相机目录，靠 Intent 一次性授权给相机 App 写入 -->
+        <provider
+            android:name=".CameraCaptureProvider"
+            android:authorities="${applicationId}.camera.capture"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <activity android:name=".TerminalActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode" />
+        <activity android:name=".RemoteControlActivity" android:exported="false"
+            android:process=":remote"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode" />
+
         <service
             android:name=".KimiService"
             android:exported="false"

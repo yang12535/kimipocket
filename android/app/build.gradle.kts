@@ -64,5 +64,14 @@ android {
 
 dependencies {
     implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
 }
+
+// Small app-owned fixes are shipped separately; installing them must not erase apt packages.
+val runtimePatches by tasks.registering(Sync::class) {
+    from(rootProject.file("../runtime/hooks"))
+    into(layout.buildDirectory.dir("generated/runtimePatches/runtime-patches"))
+}
+android.sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/runtimePatches"))
+tasks.named("preBuild").configure { dependsOn(runtimePatches) }
