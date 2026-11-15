@@ -346,9 +346,10 @@ class MainActivity : Activity() {
         val p = palette
         val engine = engineVersion()
         val sheet = Ui.Sheet(this, p, "口袋Kimi",
-            "App $appVersion" + (if (engine != null) " · 引擎 $engine" else "") + " · 长按悬浮钮可快速切换亮/暗")
+            "App $appVersion" + (if (engine != null) " · 引擎 $engine" else ""))
+        sheet.maxBodyHeight(0.78f)
 
-        sheet.sectionLabel("外观", topMarginDp = 4)
+        sheet.sectionLabel("外观", topMarginDp = 2)
         val modes = listOf("system", "light", "dark")
         sheet.add(Ui.segmented(this, p, listOf("跟随系统", "亮色", "暗色"),
             modes.indexOf(webScheme).coerceAtLeast(0)) { i ->
@@ -361,62 +362,63 @@ class MainActivity : Activity() {
             }
         })
 
-        sheet.sectionLabel("模型")
         val provCount = try {
             Providers.load(ConfigToml.parse(Providers.configFile(File(filesDir, "home")).readText()))
         } catch (_: Exception) { emptyList() }
-        sheet.add(Ui.row(this, p, "◇", "供应商与模型",
-            if (provCount.isEmpty()) "接入 OpenAI / Anthropic 兼容接口，设置思考、识图、上下文"
-            else "${provCount.size} 个供应商 · ${provCount.sumOf { it.models.size }} 个模型 · 可设思考/识图/上下文") {
-            sheet.dismiss(); providerSheets.showList()
-        })
+        sheet.group("模型",
+            Ui.row(this, p, "◇", "供应商与模型",
+                if (provCount.isEmpty()) "接入 OpenAI / Anthropic 兼容接口"
+                else "${provCount.size} 个供应商 · ${provCount.sumOf { it.models.size }} 个模型",
+                inCard = true) { sheet.dismiss(); providerSheets.showList() })
 
-        sheet.sectionLabel("常用")
+        sheet.group("工具",
+            Ui.row(this, p, ">_", "本机终端", "登录 Kimi、运行手动命令", inCard = true, dim = !KimiState.running) {
+                sheet.dismiss()
+                if (KimiState.running) startActivity(Intent(this, TerminalActivity::class.java))
+                else Toast.makeText(this, "请等待运行环境启动完成", Toast.LENGTH_SHORT).show()
+            },
+            Ui.row(this, p, "⇄", "远程控制", "控制本机，或打开同账号的其他设备", inCard = true) {
+                sheet.dismiss(); remoteControl.show()
+            },
+            Ui.row(this, p, "⇩", "导出文件", "把 ~/exports 里的文件存到手机", inCard = true) {
+                sheet.dismiss(); showExportDialog()
+            })
+
+        val notifications = getSystemService(android.app.NotificationManager::class.java)
+        val resultChannel = notifications.getNotificationChannel(TaskCompletionMonitor.CHANNEL)
+        val notificationEnabled = notifications.areNotificationsEnabled() && resultChannel?.importance != android.app.NotificationManager.IMPORTANCE_NONE
+        val granted = isStoragePermissionGranted()
+        sheet.group("权限",
+            Ui.row(this, p, "◉", "任务完成通知", "完成或失败时提醒，点通知回到会话", inCard = true,
+                trailingView = Ui.pill(this, p, if (notificationEnabled) "已开启" else "已关闭",
+                    if (notificationEnabled) p.ok else p.sub)) {
+                sheet.dismiss()
+                startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName))
+            },
+            Ui.row(this, p, "▣", "手机存储", "读写下载、相册等公共目录", inCard = true,
+                trailingView = Ui.pill(this, p, if (granted) "已开启" else "去开启",
+                    if (granted) p.ok else p.danger)) {
+                sheet.dismiss(); showStoragePermissionWarning()
+            })
+
         val update = latestRelease
         val updateSub = when {
             update == null -> "从 GitHub 获取最新版本"
             updateAvailable -> "有新版本 ${update.version}"
             isNewerVersion(appVersion, update.version) -> "本机 $appVersion 比线上 ${update.version} 新"
-            else -> "已是最新"
+            else -> "已是最新 · $appVersion"
         }
-        sheet.add(Ui.row(this, p, "↻", "检查更新", updateSub,
-            trailing = if (updateAvailable) "NEW" else "›",
-            trailingColor = if (updateAvailable) p.danger else null,
-            dot = updateUnseen) { sheet.dismiss(); showUpdateDialog() })
-        sheet.add(Ui.row(this, p, "⟳", "刷新页面", "页面卡住、一直转圈或断连时用") {
-            sheet.dismiss(); refreshWebPage()
-        })
-        sheet.add(Ui.row(this, p, "⇩", "导出文件", "把 Kimi 放进 ~/exports 的文件存到手机里") {
-            sheet.dismiss(); showExportDialog()
-        })
+        sheet.group("维护",
+            Ui.row(this, p, "↻", "检查更新", updateSub, inCard = true, dot = updateUnseen,
+                trailingView = if (updateAvailable) Ui.pill(this, p, "NEW", p.danger, showDot = false) else null) {
+                sheet.dismiss(); showUpdateDialog()
+            },
+            Ui.row(this, p, "⟳", "刷新页面", "页面卡住、一直转圈或断连时用", inCard = true) {
+                sheet.dismiss(); refreshWebPage()
+            })
 
-        sheet.sectionLabel("工具")
-        sheet.add(Ui.row(this, p, ">_", "本机终端", "登录 Kimi、运行手动命令；关闭终端会结束命令") {
-            sheet.dismiss()
-            if (KimiState.running) startActivity(Intent(this, TerminalActivity::class.java))
-            else Toast.makeText(this, "请等待运行环境启动完成", Toast.LENGTH_SHORT).show()
-        })
-        sheet.add(Ui.row(this, p, "⇄", "远程控制", "让其他设备控制本机，或打开同账号的其他设备") {
-            sheet.dismiss(); remoteControl.show()
-        })
-
-        sheet.sectionLabel("权限")
-        val notifications = getSystemService(android.app.NotificationManager::class.java)
-        val resultChannel = notifications.getNotificationChannel(TaskCompletionMonitor.CHANNEL)
-        val notificationEnabled = notifications.areNotificationsEnabled() && resultChannel?.importance != android.app.NotificationManager.IMPORTANCE_NONE
-        sheet.add(Ui.row(this, p, "◉", "任务完成通知",
-            if (notificationEnabled) "完成或失败时提醒，点通知返回对应会话" else "通知已关闭，点此打开系统通知设置") {
-            sheet.dismiss()
-            startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName))
-        })
-        val granted = isStoragePermissionGranted()
-        sheet.add(Ui.row(this, p, "▣", "手机存储",
-            if (granted) "已允许 Kimi 读写下载、相册等公共目录" else "允许后 Kimi 才能读写手机里的文件",
-            trailing = if (granted) "已开启" else "去开启",
-            trailingColor = if (granted) p.sub else p.text) {
-            sheet.dismiss(); showStoragePermissionWarning()
-        })
+        sheet.add(Ui.footnote(this, p, "提示：长按悬浮钮可快速切换亮 / 暗"), topMarginDp = 16)
         sheet.show()
     }
 

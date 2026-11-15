@@ -14,7 +14,6 @@ import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -53,22 +52,38 @@ class RemoteControlActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(colors.bg)
         }
-        val bar = LinearLayout(this).apply { setBackgroundColor(colors.bg) }
-        bar.addView(Button(this).apply {
-            text = "返回"
-            setOnClickListener { finish() }
-        })
-        val address = TextView(this).apply {
-            setPadding(12, 12, 12, 12)
-            text = Uri.parse(entryUrl).host
-            setTextColor(colors.text)
+        val bar = LinearLayout(this).apply {
+            setBackgroundColor(colors.bg)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
         }
-        bar.addView(address, LinearLayout.LayoutParams(0, -2, 1f))
-        bar.addView(Button(this).apply {
-            text = "刷新"
-            setOnClickListener { web.reload() }
-        })
+        fun barButton(label: String, desc: String, onClick: () -> Unit) = TextView(this).apply {
+            text = label
+            textSize = 20f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(colors.text)
+            contentDescription = desc
+            background = android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(
+                    if (colors.dark) android.graphics.Color.argb(40, 255, 255, 255) else android.graphics.Color.argb(24, 0, 0, 0)),
+                null, Ui.rounded(android.graphics.Color.WHITE, dp(20).toFloat()))
+            isClickable = true
+            setOnClickListener { onClick() }
+        }
+        bar.addView(barButton("‹", "返回") { finish() }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        val address = TextView(this).apply {
+            text = "🔒 " + Uri.parse(entryUrl).host
+            textSize = 13f
+            gravity = android.view.Gravity.CENTER
+            isSingleLine = true
+            setTextColor(colors.sub)
+            background = Ui.rounded(colors.surface, dp(16).toFloat())
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+        }
+        bar.addView(address, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
+        bar.addView(barButton("↻", "刷新") { web.reload() }, LinearLayout.LayoutParams(dp(44), dp(44)))
         root.addView(bar)
+        root.addView(View(this).apply { setBackgroundColor(colors.divider) }, LinearLayout.LayoutParams(-1, 1))
         web = WebView(this)
         web.settings.apply {
             javaScriptEnabled = true
@@ -97,7 +112,7 @@ class RemoteControlActivity : Activity() {
             }
 
             override fun onPageFinished(view: WebView, url: String) {
-                address.text = Uri.parse(url).host.orEmpty()
+                address.text = "🔒 " + Uri.parse(url).host.orEmpty()
                 CookieManager.getInstance().flush()
             }
         }
@@ -114,7 +129,10 @@ class RemoteControlActivity : Activity() {
             "OAuth 已离开内置页面。请在外部浏览器完成授权，然后返回这里刷新远程页面。")
         sheet.add(TextView(this).apply {
             text = url
-            textSize = 14f
+            textSize = 12.5f
+            maxLines = 4
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            typeface = android.graphics.Typeface.MONOSPACE
             setTextColor(colors.text)
             setTextIsSelectable(true)
             background = Ui.rounded(colors.surface, dp(12).toFloat())
@@ -124,7 +142,7 @@ class RemoteControlActivity : Activity() {
             Ui.button(this, colors, "复制 URL", primary = false) { copyLink(url) },
             Ui.button(this, colors, "打开授权页", primary = true) { openBrowser(url) }
         ))
-        sheet.addFooter(Ui.button(this, colors, "完成并刷新", primary = false) {
+        sheet.addFooter(Ui.button(this, colors, "我已完成授权，刷新页面", primary = false) {
             pendingAuthorizationUrl = null
             authorizationSheet = null
             sheet.dismiss()
