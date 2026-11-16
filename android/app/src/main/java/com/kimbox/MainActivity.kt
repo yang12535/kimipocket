@@ -71,7 +71,7 @@ class MainActivity : Activity() {
          * 找到网页里打开着的弹层就关掉它：Esc、弹层外按下、点 body 三种常见关闭方式都发一遍，
          * 返回弹层的简短描述（写日志用）；没有弹层返回空串
          */
-        private const val CLOSE_WEB_OVERLAY_JS = """
+        internal const val CLOSE_WEB_OVERLAY_JS = """
             (function(){
               var sel = '[role="dialog"],[role="menu"],[role="listbox"],[aria-modal="true"],[data-state="open"][data-side],[data-reka-popper-content-wrapper],[data-radix-popper-content-wrapper]';
               var els = document.querySelectorAll(sel);

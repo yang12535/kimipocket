@@ -142,6 +142,13 @@
     showHint('已粘贴');
   }
 
+  function sendInput(data) {
+    var accepted = false;
+    try { accepted = bridge.write(data); } catch (e) {}
+    if (!accepted) showHint('输入未发送：终端未就绪或输入队列已满');
+    return accepted;
+  }
+
   var SEQS = {
     esc: '\x1b',
     tab: '\t',
@@ -165,7 +172,7 @@
     }
     var seq = SEQS[button.getAttribute('data-key')];
     if (seq) {
-      try { bridge.write(seq); } catch (e) {}
+      try { sendInput(seq); } catch (e) {}
       try { term.focus(); } catch (e) {}
     }
   }
@@ -190,7 +197,7 @@
 
   term.onData(function (data) {
     if (ended) return;
-    try { bridge.write(data); } catch (e) {}
+    try { sendInput(data); } catch (e) {}
   });
 
   term.onResize(function (size) {

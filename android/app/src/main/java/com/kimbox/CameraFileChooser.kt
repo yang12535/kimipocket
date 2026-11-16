@@ -19,7 +19,7 @@ import java.io.IOException
  * 接管 `<input type=file>`：先问用户「拍照 / 选择文件」，拍照走系统相机 ACTION_IMAGE_CAPTURE，
  * 照片经 [CameraCaptureProvider] 的受限 content:// URI 交给相机写满整张 JPEG，再交给 WebView 上传。
  *
- * 宿主（MainActivity）要做的四件事：
+ * 宿主（MainActivity / RemoteControlActivity）要做的四件事：
  * ```
  * onShowFileChooser: fileChooser?.release(); fileChooser = CameraFileChooser(this, palette, cb)
  *                    .also { it.show(params) }

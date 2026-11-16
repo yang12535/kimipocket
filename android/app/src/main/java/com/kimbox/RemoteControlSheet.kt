@@ -10,6 +10,7 @@ import org.json.JSONObject
 
 class RemoteControlSheet(private val activity: Activity, private val palette: () -> Ui.Palette) {
     private var busy = false
+    private var selfDeviceId = ""
 
     fun show() {
         val port = KimiState.port
@@ -103,6 +104,7 @@ class RemoteControlSheet(private val activity: Activity, private val palette: ()
 
                     // 其他设备：在线优先，离线置灰；同名设备补 ID 尾号区分
                     val selfId = status.optString("device_id")
+                    selfDeviceId = selfId
                     val others = mutableListOf<JSONObject>()
                     if (devices != null) for (i in 0 until devices.length()) {
                         val d = devices.optJSONObject(i) ?: continue
@@ -180,6 +182,8 @@ class RemoteControlSheet(private val activity: Activity, private val palette: ()
         val intent = if (android.os.Build.VERSION.SDK_INT < 28) Intent(Intent.ACTION_VIEW, Uri.parse(url))
             else Intent(activity, RemoteControlActivity::class.java).putExtra("url", url)
                 .putExtra("dark", palette().dark)
+                .putExtra("rename_device_id", selfDeviceId)
+                .putExtra("device_alias", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim())
         try { activity.startActivity(intent) } catch (_: android.content.ActivityNotFoundException) { toast("没有可用的浏览器") }
     }
 

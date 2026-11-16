@@ -336,9 +336,7 @@ class TerminalActivity : Activity() {
         }
 
         @JavascriptInterface
-        fun write(data: String) {
-            session?.write(data)
-        }
+        fun write(data: String): Boolean = session?.write(data) ?: false
 
         @JavascriptInterface
         fun openUrl(url: String) {

@@ -161,6 +161,8 @@ test_rewrite_basic() {
     printf '#!/data/data/com.termux/files/usr/bin/sh\nexit 0\n' > "$t/tree/DEBIAN/postinst"
     chmod 0700 "$t/tree/DEBIAN/postinst"
     gen_md5sums "$t/tree"
+    # 合法的 md5sums 也允许 ./ 前缀；改写后仍必须重算对应文件的内容哈希
+    sed -i 's|  |  ./|' "$t/tree/DEBIAN/md5sums"
     build_deb "$t/tree" "$t/demo.deb" xz
     list="$t/list"; log="$t/log"
     printf '%s\n' "$t/demo.deb" > "$list"
@@ -764,6 +766,56 @@ EOS
     assert_eq "" "$(ls -A "$t" | grep 'kimbox-new' || true)" "校验闸门：没有残留临时 deb"
 }
 
+# dpkg-deb -c 的目录清单也走 run_child：校验卡住时必须能立即取消，且原 deb 不动
+test_signal_verify_stops() {
+    local t=$WORK/signal-verify p list log before real pid marker t0 t1 rc i=0
+    mkdir -p "$t"
+    p=$(make_prefix "$t/prefix")
+    real=$(command -v dpkg-deb)
+    mkdir -p "$t/tree/data/data/com.termux/files/usr/bin"
+    new_tree "$t/tree"
+    printf '#!/bin/sh\necho /data/data/com.termux/files/usr\n' > "$t/tree/data/data/com.termux/files/usr/bin/v"
+    chmod 0755 "$t/tree/data/data/com.termux/files/usr/bin/v"
+    gen_md5sums "$t/tree"
+    build_deb "$t/tree" "$t/v.deb" xz
+    rm -f "$p/bin/dpkg-deb"
+    marker="$t/verify.started"
+    cat > "$p/bin/dpkg-deb" <<EOS
+#!/usr/bin/env bash
+if [ "\$1" = "-c" ]; then
+    : > "$marker"
+    exec sleep 300
+fi
+exec "$real" "\$@"
+EOS
+    chmod 0755 "$p/bin/dpkg-deb"
+    list="$t/list"; log="$t/log"
+    printf '%s\n' "$t/v.deb" > "$list"
+    before=$(sha "$t/v.deb")
+
+    KIMBOX_PREFIX="$p" bash "$HOOK" < "$list" > "$log" 2>&1 &
+    pid=$!
+    while [ ! -f "$marker" ] && [ "$i" -lt 100 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if [ ! -f "$marker" ]; then
+        bad "校验取消：钩子没能走到目录清单校验阶段"
+        kill -KILL "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        return
+    fi
+    t0=$(date +%s)
+    kill -TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rc=$?
+    t1=$(date +%s)
+    assert_eq 143 "$rc" "校验取消：TERM 后以 143 退出"
+    if [ $((t1 - t0)) -le 5 ]; then ok "校验取消：TERM 后 5 秒内退出"; else bad "校验取消：超过 5 秒才退出"; fi
+    assert_eq "$before" "$(sha "$t/v.deb")" "校验取消：原 deb 未动"
+    assert_eq "" "$(ls -A "$p/tmp")" "校验取消：临时目录已清理"
+}
+
 test_signal_stops() {
     local t=$WORK/signal p list log before real pid marker leader child lp cpid t0 t1 rc j
     mkdir -p "$t"
@@ -990,7 +1042,7 @@ main() {
                 node_short_write node_write_batching node_error md5sums_absent hardlinks \
                 compression_fidelity stdin_streaming safe_fail_corrupt safe_fail_no_node \
                 safe_fail_node_error safe_fail_repack_fails no_compression_fallback \
-                repack_retry_preserves_compression verify_gate signal_stops \
+                repack_retry_preserves_compression verify_gate signal_verify_stops signal_stops \
                 signal_kill_ignores_term no_tempdir apt_config_guard; do
         printf '── %s\n' "$name"
         "test_$name"

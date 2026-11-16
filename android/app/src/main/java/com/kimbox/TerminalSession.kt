@@ -54,6 +54,7 @@ class TerminalSession(
     private val pidFile = File(terminalDir, "session-$token.pid")
 
     private val queue = ArrayBlockingQueue<ByteArray>(MAX_PENDING_CHUNKS)
+    private val inputQueue = ArrayBlockingQueue<ByteArray>(16)
     private val pumpDone = CountDownLatch(1)
 
     @Volatile private var closed = false
@@ -66,6 +67,7 @@ class TerminalSession(
     private var process: Process? = null
     private var stdin: OutputStream? = null
     private var pumpThread: Thread? = null
+    private var writerThread: Thread? = null
 
     // 自己所在进程组：无论 /proc 里读到什么，都不向它发信号
     private val selfPgid: Int by lazy {
@@ -89,6 +91,10 @@ class TerminalSession(
             process = p
             stdin = p.outputStream
 
+            writerThread = Thread({ writeLoop() }, "terminal-writer").apply {
+                isDaemon = true
+                start()
+            }
             pumpThread = Thread({ pumpLoop() }, "terminal-pump").apply {
                 isDaemon = true
                 start()
@@ -104,20 +110,33 @@ class TerminalSession(
         }
     }
 
-    fun write(data: ByteArray) {
-        if (closed || data.isEmpty()) return
-        val out = stdin ?: return
-        synchronized(this) {
-            if (closed) return
+    fun write(data: ByteArray): Boolean {
+        if (closed || data.isEmpty()) return false
+        return inputQueue.offer(data)
+    }
+
+    fun write(text: String): Boolean = write(text.toByteArray(Charsets.UTF_8))
+
+    private fun writeLoop() {
+        while (!closed) {
+            val data = try {
+                inputQueue.poll(200, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                break
+            } ?: continue
+            val out = stdin ?: break
             try {
-                out.write(data)
-                out.flush()
+                synchronized(this) {
+                    if (!closed) {
+                        out.write(data)
+                        out.flush()
+                    }
+                }
             } catch (_: Throwable) {
+                break
             }
         }
     }
-
-    fun write(text: String) = write(text.toByteArray(Charsets.UTF_8))
 
     fun resize(newCols: Int, newRows: Int) {
         val c = newCols.coerceIn(MIN_SIZE, MAX_COLS)
@@ -155,10 +174,9 @@ class TerminalSession(
         if (closed) return
         closed = true
         pumpThread?.interrupt()
+        writerThread?.interrupt()
+        inputQueue.clear()
         val p = process
-        try { stdin?.close() } catch (_: Throwable) {}
-        stdin = null
-
         if (p == null) {
             cleanupFiles()
             return
@@ -187,7 +205,7 @@ class TerminalSession(
 
     private fun buildShellCommand(bash: File, resizeFifo: File?): String {
         // token 放在 -c 命令行里：即使 FIFO 创建失败，root pid 也能被唯一识别
-        val initial = ": $token; stty cols $cols rows $rows 2>/dev/null"
+        val initial = ": $token; export HISTFILE=/dev/null; stty cols $cols rows $rows 2>/dev/null"
         if (resizeFifo == null) return "$initial; exec ${shQuote(bash.path)} -i"
 
         // FIFO 每收到一行 "列 行" 就通过 /dev/tty 改 PTY 尺寸，内核会给前台进程发 SIGWINCH。

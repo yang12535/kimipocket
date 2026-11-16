@@ -1,6 +1,9 @@
 package com.kimbox
 
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -12,7 +15,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -20,27 +26,35 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import com.kimbox.Ui.dp
+import org.json.JSONObject
 
 class RemoteControlActivity : Activity() {
     private lateinit var web: WebView
     private lateinit var entryUrl: String
     private lateinit var colors: Ui.Palette
+    private var fileChooser: CameraFileChooser? = null
     private var pendingAuthorizationUrl: String? = null
     private var authorizationSheet: Ui.Sheet? = null
     private var authorizationStatus: TextView? = null
     private val handler = Handler(Looper.getMainLooper())
     private var resumed = false
+    private var remoteSessionActive = false
     private var authorizationStartedAt = 0L
     private var authorizationGeneration = 0
     private val authorizationPoll = Runnable { checkAuthorization() }
+    private val idleClose = Runnable {
+        if (!resumed && remoteSessionActive && fileChooser == null && pendingAuthorizationUrl == null && !isFinishing && !isDestroyed) finish()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CameraFileChooser.discardRestored(this, savedInstanceState)
         if (Build.VERSION.SDK_INT >= 28 && !profileInitialized) {
             WebView.setDataDirectorySuffix("remote-control")
             profileInitialized = true
         }
         entryUrl = intent.getStringExtra("url").orEmpty()
+        remoteSessionActive = Uri.parse(entryUrl).getQueryParameter("rc") == "1"
         if (!validEntry(entryUrl)) {
             finish()
             return
@@ -107,6 +121,35 @@ class RemoteControlActivity : Activity() {
         }
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
+        web.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                wv: WebView,
+                cb: ValueCallback<Array<Uri>>,
+                params: FileChooserParams
+            ): Boolean {
+                if (!validEntry(wv.url.orEmpty())) {
+                    cb.onReceiveValue(null)
+                    return true
+                }
+                fileChooser?.release()
+                val chooser = CameraFileChooser(this@RemoteControlActivity, colors, cb)
+                fileChooser = chooser
+                try {
+                    chooser.show(params)
+                } catch (_: Exception) {
+                    chooser.release()
+                    fileChooser = null
+                }
+                return true
+            }
+
+            override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
+                val text = msg.message()
+                if (!text.startsWith(RC_NOTIFICATION)) return false
+                forwardRemoteNotification(text.removePrefix(RC_NOTIFICATION))
+                return true
+            }
+        }
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val uri = request.url
@@ -126,7 +169,10 @@ class RemoteControlActivity : Activity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 address.text = "🔒 " + Uri.parse(url).host.orEmpty()
+                remoteSessionActive = remoteSessionActive || Uri.parse(url).getQueryParameter("rc") == "1"
                 CookieManager.getInstance().flush()
+                installNotificationHook()
+                maybeRenameOwnDevice()
                 scheduleAuthorizationCheck(0)
             }
         }
@@ -249,6 +295,8 @@ class RemoteControlActivity : Activity() {
                 "\"authorized\"" -> {
                     CookieManager.getInstance().flush()
                     clearAuthorization()
+                    installNotificationHook()
+                    maybeRenameOwnDevice()
                     toast("远程控制已登录")
                 }
                 "\"ended\"" -> {
@@ -262,6 +310,94 @@ class RemoteControlActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun installNotificationHook() {
+        val current = web.url.orEmpty()
+        if (!validEntry(current)) return
+        val origin = "https://${Uri.parse(current).host}"
+        web.evaluateJavascript("""
+            (() => {
+              if (location.origin !== '$origin' || window.__kimboxRcNotifications) return;
+              window.__kimboxRcNotifications = true;
+              function KimboxNotification(title, options) {
+                const opts = options || {};
+                console.log('$RC_NOTIFICATION' + JSON.stringify({
+                  title: String(title || ''), body: String(opts.body || ''), tag: String(opts.tag || '')
+                }));
+                this.onclick = null;
+              }
+              KimboxNotification.permission = 'granted';
+              KimboxNotification.requestPermission = () => Promise.resolve('granted');
+              KimboxNotification.prototype.close = function() {};
+              KimboxNotification.prototype.addEventListener = function() {};
+              KimboxNotification.prototype.removeEventListener = function() {};
+              window.Notification = KimboxNotification;
+            })()
+        """.trimIndent(), null)
+    }
+
+    private fun forwardRemoteNotification(raw: String) {
+        if (raw.length > 16 * 1024 || isFinishing || isDestroyed) return
+        val data = try { JSONObject(raw) } catch (_: Exception) { return }
+        val title = data.optString("title").take(256).ifBlank { "远程控制通知" }
+        val body = data.optString("body").take(1024).ifBlank { "点击查看远程任务结果" }
+        val tag = data.optString("tag").take(256).ifBlank { "rc-generic" }
+        remoteSessionActive = true
+        scheduleIdleClose()
+        TaskCompletionMonitor.ensureChannel(this)
+        val click = Intent(this, RemoteControlActivity::class.java)
+            .setData(Uri.parse(entryUrl))
+            .putExtra("url", entryUrl)
+            .putExtra("dark", colors.dark)
+            .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pending = PendingIntent.getActivity(this, 0, click,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val notification = Notification.Builder(this, TaskCompletionMonitor.CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setSubText("远程控制")
+            .setContentIntent(pending)
+            .setAutoCancel(true)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .build()
+        getSystemService(NotificationManager::class.java).notify("rc:$tag", 3, notification)
+    }
+
+    private fun scheduleIdleClose() {
+        handler.removeCallbacks(idleClose)
+        if (!resumed && remoteSessionActive && fileChooser == null && pendingAuthorizationUrl == null) handler.postDelayed(idleClose, IDLE_TIMEOUT_MS)
+    }
+
+    private fun maybeRenameOwnDevice() {
+        val id = intent.getStringExtra("rename_device_id").orEmpty()
+        val alias = intent.getStringExtra("device_alias").orEmpty().trim()
+        val current = web.url.orEmpty()
+        if (id.isBlank() || alias.isBlank() || !validEntry(current)) return
+        val origin = "https://${Uri.parse(current).host}"
+        val quotedId = JSONObject.quote(id)
+        val quotedAlias = JSONObject.quote(alias)
+        web.evaluateJavascript("""
+            (() => {
+              if (location.origin !== '$origin') return;
+              fetch('/v1/remote/devices', {credentials: 'same-origin', cache: 'no-store', redirect: 'error'})
+                .then(r => r.ok ? r.json() : null)
+                .then(j => {
+                  if (!j || !Array.isArray(j.devices)) return null;
+                  const device = j.devices.find(d => d.device_id === $quotedId);
+                  if (!device) return null;
+                  const current = String(device.alias || '').trim();
+                  if (current && current.toLowerCase() !== 'localhost') return null;
+                  return fetch('/v1/remote/devices/' + encodeURIComponent($quotedId), {
+                    method: 'PATCH', credentials: 'same-origin', redirect: 'error',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({alias: $quotedAlias})
+                  });
+                }).catch(() => {});
+            })()
+        """.trimIndent(), null)
     }
 
     private fun openBrowser(url: String) {
@@ -283,7 +419,18 @@ class RemoteControlActivity : Activity() {
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
 
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (fileChooser?.onActivityResult(requestCode, resultCode, data) == true) {
+            fileChooser = null
+            return
+        }
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
+        fileChooser?.saveState(outState)
         outState.putString("pending_authorization_url", pendingAuthorizationUrl)
         outState.putLong("authorization_started_at", authorizationStartedAt)
         if (::web.isInitialized) web.saveState(outState)
@@ -293,23 +440,36 @@ class RemoteControlActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        handler.removeCallbacks(idleClose)
         scheduleAuthorizationCheck(0)
     }
 
     override fun onPause() {
         resumed = false
         handler.removeCallbacks(authorizationPoll)
+        scheduleIdleClose()
         if (::web.isInitialized) CookieManager.getInstance().flush()
         super.onPause()
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (::web.isInitialized && web.canGoBack()) web.goBack() else finish()
+        if (!::web.isInitialized) {
+            finish()
+            return
+        }
+        web.evaluateJavascript(MainActivity.CLOSE_WEB_OVERLAY_JS) { result ->
+            val closedOverlay = result != null && result != "null" && result.trim('"').isNotEmpty()
+            if (closedOverlay || isDestroyed || isFinishing) return@evaluateJavascript
+            if (web.canGoBack()) web.goBack() else finish()
+        }
     }
 
     override fun onDestroy() {
         clearAuthorization()
+        handler.removeCallbacks(idleClose)
+        fileChooser?.release()
+        fileChooser = null
         if (::web.isInitialized) {
             web.stopLoading()
             web.destroy()
@@ -330,6 +490,8 @@ class RemoteControlActivity : Activity() {
     }
 
     companion object {
+        private const val RC_NOTIFICATION = "__kimbox_rc_notification:"
+        private const val IDLE_TIMEOUT_MS = 15 * 60 * 1000L
         private var profileInitialized = false
 
         private fun isAuthorizationUrl(uri: Uri): Boolean =

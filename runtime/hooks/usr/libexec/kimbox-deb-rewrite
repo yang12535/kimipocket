@@ -171,8 +171,9 @@ build_deb_minimal() {
 # 校验重打包产物：控制区能读、路径里不再有 com.termux、且 com.kimbox 前缀在场
 verify_deb() {
     local f=$1 toc
-    dpkg-deb -I "$f" >/dev/null 2>&1 || return 1
-    toc=$(dpkg-deb -c "$f" 2>/dev/null) || return 1
+    run_child dpkg-deb -I "$f" >/dev/null 2>&1 </dev/null || return 1
+    run_child dpkg-deb -c "$f" >"$CUR_TMP/toc" 2>/dev/null </dev/null || return 1
+    toc=$(cat "$CUR_TMP/toc") || return 1
     case $toc in
         *com.termux*) return 1 ;;
     esac

@@ -99,10 +99,11 @@ function patchInPlace(fd, size, state) {
         if (n <= 0) throw new Error("读取提前结束（偏移 " + off + "，已读 " + n + " 字节）");
         const total = carry + n;
         const base = off - carry; // buf[0] 对应的文件偏移
+        const current = buf.subarray(0, total);
         const ranges = [];
         let i = 0;
         while (i + OLD.length <= total) {
-            const j = buf.indexOf(OLD, i);
+            const j = current.indexOf(OLD, i);
             // 越过 total 的命中属于“块尾残缺”，留给下一块（靠 carry 重叠）处理
             if (j === -1 || j + OLD.length > total) break;
             NEW.copy(buf, j);
@@ -241,8 +242,9 @@ function rewriteMd5sums(md5Path, treeRoot, dirty) {
         let hash = m[1];
         const before = m[2];
         const after = before.replace(/com\.termux/g, "com.kimbox");
-        if (dirty.has(after)) {
-            hash = md5File(Buffer.from(treeRoot + "/" + after, "latin1"));
+        const relative = after.startsWith("./") ? after.slice(2) : after;
+        if (dirty.has(relative)) {
+            hash = md5File(Buffer.from(treeRoot + "/" + relative, "latin1"));
             updated++;
         }
         if (after !== before) renamed++;
