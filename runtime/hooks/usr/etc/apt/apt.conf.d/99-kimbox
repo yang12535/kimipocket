@@ -1,2 +1,11 @@
-// 安装前把 deb 内的 com.termux 路径/内容重写为本应用前缀（等长 10 字符替换）
+// 安装前把 deb 内的 com.termux 路径/内容重写为本应用前缀（等长 10 字符替换）。
+// 注意：这个钩子只在安装 deb 前由 dpkg 调用；`apt update` 不经过它，
+// 更新卡住/变慢不是重写钩子能解决的问题。
 DPkg::Pre-Install-Pkgs { "/data/data/com.kimbox/files/usr/libexec/kimbox-deb-rewrite"; };
+
+// 给下载阶段加上有限的重试与超时，镜像无响应时 apt 不会无限挂住。
+// 只影响网络行为，不改 sources.list，也不改任何软件源地址。
+Acquire::Retries "3";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+Acquire::ftp::Timeout "30";

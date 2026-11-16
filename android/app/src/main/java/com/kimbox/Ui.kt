@@ -41,6 +41,7 @@ object Ui {
         val accent: Int,
         val onAccent: Int,
         val danger: Int,
+        val ok: Int,
     )
 
     val LIGHT = Palette(
@@ -53,6 +54,7 @@ object Ui {
         accent = Color.rgb(24, 24, 27),
         onAccent = Color.WHITE,
         danger = Color.rgb(239, 68, 68),
+        ok = Color.rgb(22, 163, 74),
     )
 
     val DARK = Palette(
@@ -65,6 +67,7 @@ object Ui {
         accent = Color.rgb(244, 244, 245),
         onAccent = Color.rgb(24, 24, 27),
         danger = Color.rgb(248, 113, 113),
+        ok = Color.rgb(74, 222, 128),
     )
 
     fun Activity.dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
@@ -188,9 +191,17 @@ object Ui {
             add(TextView(activity).apply {
                 this.text = text
                 textSize = 12f
+                letterSpacing = 0.04f
+                setTypeface(typeface, Typeface.BOLD)
                 setTextColor(p.sub)
-                setPadding(activity.dp(4), 0, 0, activity.dp(6))
+                setPadding(activity.dp(6), 0, 0, activity.dp(7))
             }, topMarginDp)
+        }
+
+        /** 带小标题的一组卡片 */
+        fun group(label: String?, vararg rows: View?, topMarginDp: Int = 18) {
+            if (label != null) sectionLabel(label, topMarginDp)
+            add(card(activity, p, *rows), if (label == null) topMarginDp else 0)
         }
 
         fun show() = dialog.show()
@@ -201,55 +212,110 @@ object Ui {
     fun row(
         a: Activity, p: Palette, icon: String, title: String, subtitle: String?,
         trailing: String? = "›", trailingColor: Int? = null, dot: Boolean = false,
+        inCard: Boolean = false, trailingView: View? = null, dim: Boolean = false,
         onClick: () -> Unit,
     ): View {
-        val radius = a.dp(14).toFloat()
+        val radius = a.dp(if (inCard) 0 else 14).toFloat()
         return LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(a.dp(10), a.dp(12), a.dp(12), a.dp(12))
+            minimumHeight = a.dp(if (inCard) 60 else 64)
+            if (inCard) setPadding(a.dp(14), a.dp(10), a.dp(12), a.dp(10))
+            else setPadding(a.dp(10), a.dp(12), a.dp(12), a.dp(12))
+            // 卡片内用直角 ripple，圆角由卡片 clipToOutline 裁掉
             background = ripple(p, null, radius)
+            if (dim) alpha = 0.55f
             isClickable = true
             setOnClickListener { onClick() }
 
             val iconBox = FrameLayout(a)
             iconBox.addView(TextView(a).apply {
                 text = icon
-                textSize = 17f
+                textSize = if (inCard) 15f else 17f
                 gravity = Gravity.CENTER
                 setTextColor(p.text)
-                background = rounded(p.surface, a.dp(10).toFloat())
-            }, FrameLayout.LayoutParams(a.dp(38), a.dp(38)))
+                background = rounded(if (inCard) iconTint(p) else p.surface, a.dp(if (inCard) 9 else 10).toFloat())
+            }, FrameLayout.LayoutParams(a.dp(if (inCard) 32 else 38), a.dp(if (inCard) 32 else 38)))
             if (dot) {
                 iconBox.addView(View(a).apply {
                     background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(p.danger) }
                 }, FrameLayout.LayoutParams(a.dp(9), a.dp(9), Gravity.TOP or Gravity.END))
             }
-            addView(iconBox, LinearLayout.LayoutParams(a.dp(40), a.dp(40)))
+            addView(iconBox, LinearLayout.LayoutParams(a.dp(if (inCard) 34 else 40), a.dp(if (inCard) 34 else 40)))
 
             val texts = LinearLayout(a).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(a.dp(12), 0, a.dp(8), 0)
                 addView(TextView(a).apply {
                     text = title
-                    textSize = 16f
+                    textSize = if (inCard) 15.5f else 16f
                     setTextColor(p.text)
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
                 })
                 if (subtitle != null) addView(TextView(a).apply {
                     text = subtitle
                     textSize = 12.5f
                     setTextColor(p.sub)
-                    setPadding(0, a.dp(1), 0, 0)
+                    setPadding(0, a.dp(2), 0, 0)
+                    if (inCard) { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END }
                 })
             }
             addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-            if (trailing != null) addView(TextView(a).apply {
+            if (trailingView != null) addView(trailingView)
+            else if (trailing != null) addView(TextView(a).apply {
                 text = trailing
                 textSize = if (trailing == "›") 22f else 13f
                 setTextColor(trailingColor ?: p.sub)
             })
         }
+    }
+
+    /** 卡片内图标底色：比卡片面略亮/略暗一档 */
+    private fun iconTint(p: Palette) = if (p.dark) Color.rgb(58, 58, 64) else Color.WHITE
+
+    /**
+     * 分组卡片：圆角面 + 行间细分隔线（缩进对齐文字）。
+     * 行请用 row(..., inCard = true) 生成；也可放任意 View。
+     */
+    fun card(a: Activity, p: Palette, vararg rows: View?): LinearLayout = LinearLayout(a).apply {
+        orientation = LinearLayout.VERTICAL
+        background = rounded(p.surface, a.dp(16).toFloat())
+        clipToOutline = true
+        var first = true
+        rows.filterNotNull().forEach { r ->
+            if (!first) addView(View(a).apply { setBackgroundColor(p.divider) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, a.dp(1) / 2)).apply {
+                    leftMargin = a.dp(62)
+                })
+            addView(r, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            first = false
+        }
+    }
+
+    /** 状态小胶囊：前置圆点 + 文字，tone 决定颜色（ok/danger/sub） */
+    fun pill(a: Activity, p: Palette, label: String, tone: Int, showDot: Boolean = true): View =
+        LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(a.dp(8), a.dp(3), a.dp(10), a.dp(3))
+            val bg = Color.argb(if (p.dark) 46 else 30, Color.red(tone), Color.green(tone), Color.blue(tone))
+            background = rounded(bg, a.dp(20).toFloat())
+            if (showDot) addView(View(a).apply {
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(tone) }
+            }, LinearLayout.LayoutParams(a.dp(6), a.dp(6)).apply { rightMargin = a.dp(5) })
+            addView(TextView(a).apply { text = label; textSize = 12f; setTextColor(tone) })
+        }
+
+    /** 面板底部的小号说明文字 */
+    fun footnote(a: Activity, p: Palette, text: String): TextView = TextView(a).apply {
+        this.text = text
+        textSize = 12f
+        setTextColor(p.sub)
+        gravity = Gravity.CENTER
+        alpha = 0.8f
+        setPadding(a.dp(8), a.dp(4), a.dp(8), 0)
     }
 
     /** 分段选择（如 跟随系统 / 亮色 / 暗色），点中立即回调 */

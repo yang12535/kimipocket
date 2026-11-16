@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,interactive-widget=resizes-content">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="color-scheme" content="dark">
+<title>临时终端</title>
+<link rel="stylesheet" href="xterm.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <div id="terminal" aria-label="终端"></div>
+  <div id="status" role="status" hidden></div>
+  <div id="keys">
+    <button type="button" data-key="esc">Esc</button>
+    <button type="button" data-key="tab">Tab</button>
+    <button type="button" data-key="ctrlc">Ctrl+C</button>
+    <button type="button" data-key="left" aria-label="左方向键">←</button>
+    <button type="button" data-key="up" aria-label="上方向键">↑</button>
+    <button type="button" data-key="down" aria-label="下方向键">↓</button>
+    <button type="button" data-key="right" aria-label="右方向键">→</button>
+    <button type="button" data-action="copy">复制</button>
+    <button type="button" data-action="paste">粘贴</button>
+  </div>
+</div>
+<script src="xterm.js"></script>
+<script src="addon-fit.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

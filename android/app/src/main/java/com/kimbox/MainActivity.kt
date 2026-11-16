@@ -55,13 +55,14 @@ class MainActivity : Activity() {
     private var themeHookReady = false
     private var pendingScheme: String? = null
 
-    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+    private var fileChooser: CameraFileChooser? = null
+    private var pendingSession: String? = null
+    private val remoteControl by lazy { RemoteControlSheet(this) { palette } }
 
     // SAF 导出：用户从 picker 选完目标 URI 后，onActivityResult 把暂存的文件写过去
     private var pendingExportFile: File? = null
 
     companion object {
-        private const val FILE_CHOOSER_REQ = 42
         private const val EXPORT_PICKER_REQ = 43
         private const val STORAGE_PERMISSION_REQ = 100
         private const val THEME_MSG = "__kimbox_theme:"
@@ -70,7 +71,7 @@ class MainActivity : Activity() {
          * 找到网页里打开着的弹层就关掉它：Esc、弹层外按下、点 body 三种常见关闭方式都发一遍，
          * 返回弹层的简短描述（写日志用）；没有弹层返回空串
          */
-        private const val CLOSE_WEB_OVERLAY_JS = """
+        internal const val CLOSE_WEB_OVERLAY_JS = """
             (function(){
               var sel = '[role="dialog"],[role="menu"],[role="listbox"],[aria-modal="true"],[data-state="open"][data-side],[data-reka-popper-content-wrapper],[data-radix-popper-content-wrapper]';
               var els = document.querySelectorAll(sel);
@@ -135,6 +136,9 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CameraFileChooser.discardRestored(this, savedInstanceState)
+        pendingSession = savedInstanceState?.getString("pending_session")
+        receiveSessionIntent(intent)
 
         try {
             startForegroundService(Intent(this, KimiService::class.java))
@@ -163,6 +167,7 @@ class MainActivity : Activity() {
                 // 其他 loopback 端口（如同机恶意 App 开的仿冒页面）与外部链接一律交系统浏览器
                 val enginePort = KimiState.port
                 val isEngine = enginePort != null &&
+                    u.scheme == "http" && u.userInfo == null &&
                     (u.host == "127.0.0.1" || u.host == "localhost") && u.port == enginePort
                 return if (isEngine) {
                     false
@@ -195,22 +200,16 @@ class MainActivity : Activity() {
                 cb: ValueCallback<Array<Uri>>,
                 params: FileChooserParams
             ): Boolean {
-                fileChooserCallback?.onReceiveValue(null)
-                fileChooserCallback = cb
-                return try {
-                    val i = Intent(Intent.ACTION_GET_CONTENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "*/*"
-                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                        val accepts = params.acceptTypes?.filter { it.isNotBlank() } ?: emptyList()
-                        if (accepts.size == 1) type = accepts[0]
-                    }
-                    startActivityForResult(Intent.createChooser(i, "选择文件"), FILE_CHOOSER_REQ)
-                    true
-                } catch (e: ActivityNotFoundException) {
-                    fileChooserCallback = null
-                    false
+                val current = Uri.parse(wv.url.orEmpty())
+                if (current.scheme != "http" || current.host !in setOf("127.0.0.1", "localhost") || current.port != KimiState.port) {
+                    cb.onReceiveValue(null)
+                    return true
                 }
+                fileChooser?.release()
+                val chooser = CameraFileChooser(this@MainActivity, palette, cb)
+                fileChooser = chooser
+                try { chooser.show(params) } catch (_: Exception) { chooser.release(); fileChooser = null }
+                return true
             }
         }
 
@@ -347,9 +346,10 @@ class MainActivity : Activity() {
         val p = palette
         val engine = engineVersion()
         val sheet = Ui.Sheet(this, p, "口袋Kimi",
-            "App $appVersion" + (if (engine != null) " · 引擎 $engine" else "") + " · 长按悬浮钮可快速切换亮/暗")
+            "App $appVersion" + (if (engine != null) " · 引擎 $engine" else ""))
+        sheet.maxBodyHeight(0.78f)
 
-        sheet.sectionLabel("外观", topMarginDp = 4)
+        sheet.sectionLabel("外观", topMarginDp = 2)
         val modes = listOf("system", "light", "dark")
         sheet.add(Ui.segmented(this, p, listOf("跟随系统", "亮色", "暗色"),
             modes.indexOf(webScheme).coerceAtLeast(0)) { i ->
@@ -362,43 +362,73 @@ class MainActivity : Activity() {
             }
         })
 
-        sheet.sectionLabel("模型")
         val provCount = try {
             Providers.load(ConfigToml.parse(Providers.configFile(File(filesDir, "home")).readText()))
         } catch (_: Exception) { emptyList() }
-        sheet.add(Ui.row(this, p, "◇", "供应商与模型",
-            if (provCount.isEmpty()) "接入 OpenAI / Anthropic 兼容接口，设置思考、识图、上下文"
-            else "${provCount.size} 个供应商 · ${provCount.sumOf { it.models.size }} 个模型 · 可设思考/识图/上下文") {
-            sheet.dismiss(); providerSheets.showList()
-        })
+        sheet.group("模型",
+            Ui.row(this, p, "◇", "供应商与模型",
+                if (provCount.isEmpty()) "接入 OpenAI / Anthropic 兼容接口"
+                else "${provCount.size} 个供应商 · ${provCount.sumOf { it.models.size }} 个模型",
+                inCard = true) { sheet.dismiss(); providerSheets.showList() })
 
-        sheet.sectionLabel("常用")
+        sheet.group("工具",
+            Ui.row(this, p, ">_", "本机终端", "登录 Kimi、运行手动命令", inCard = true, dim = !KimiState.running) {
+                sheet.dismiss()
+                if (KimiState.running) startActivity(Intent(this, TerminalActivity::class.java))
+                else Toast.makeText(this, "请等待运行环境启动完成", Toast.LENGTH_SHORT).show()
+            },
+            Ui.row(this, p, "⇄", "远程控制", "控制本机，或打开同账号的其他设备", inCard = true) {
+                sheet.dismiss(); remoteControl.show()
+            },
+            Ui.row(this, p, "⇩", "导出文件", "把 ~/exports 里的文件存到手机", inCard = true) {
+                sheet.dismiss(); showExportDialog()
+            })
+
+        val notifications = getSystemService(android.app.NotificationManager::class.java)
+        TaskCompletionMonitor.ensureChannel(this)
+        val resultChannel = notifications.getNotificationChannel(TaskCompletionMonitor.CHANNEL)
+        val notificationEnabled = notifications.areNotificationsEnabled() && resultChannel?.importance != android.app.NotificationManager.IMPORTANCE_NONE
+        val notificationLabel = when {
+            !notificationEnabled -> "已关闭"
+            (resultChannel?.importance ?: 0) < android.app.NotificationManager.IMPORTANCE_DEFAULT -> "静默"
+            (resultChannel?.importance ?: 0) < android.app.NotificationManager.IMPORTANCE_HIGH -> "普通提醒"
+            else -> "高优先级"
+        }
+        val granted = isStoragePermissionGranted()
+        sheet.group("权限",
+            Ui.row(this, p, "◉", "任务完成通知", "点此设置声音、振动与悬浮通知", inCard = true,
+                trailingView = Ui.pill(this, p, notificationLabel,
+                    if (notificationEnabled) p.ok else p.sub)) {
+                sheet.dismiss()
+                val action = if (notifications.areNotificationsEnabled()) android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS
+                    else android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                startActivity(Intent(action)
+                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+                    .putExtra(android.provider.Settings.EXTRA_CHANNEL_ID, TaskCompletionMonitor.CHANNEL))
+            },
+            Ui.row(this, p, "▣", "手机存储", "读写下载、相册等公共目录", inCard = true,
+                trailingView = Ui.pill(this, p, if (granted) "已开启" else "去开启",
+                    if (granted) p.ok else p.danger)) {
+                sheet.dismiss(); showStoragePermissionWarning()
+            })
+
         val update = latestRelease
         val updateSub = when {
             update == null -> "从 GitHub 获取最新版本"
             updateAvailable -> "有新版本 ${update.version}"
             isNewerVersion(appVersion, update.version) -> "本机 $appVersion 比线上 ${update.version} 新"
-            else -> "已是最新"
+            else -> "已是最新 · $appVersion"
         }
-        sheet.add(Ui.row(this, p, "↻", "检查更新", updateSub,
-            trailing = if (updateAvailable) "NEW" else "›",
-            trailingColor = if (updateAvailable) p.danger else null,
-            dot = updateUnseen) { sheet.dismiss(); showUpdateDialog() })
-        sheet.add(Ui.row(this, p, "⟳", "刷新页面", "页面卡住、一直转圈或断连时用") {
-            sheet.dismiss(); refreshWebPage()
-        })
-        sheet.add(Ui.row(this, p, "⇩", "导出文件", "把 Kimi 放进 ~/exports 的文件存到手机里") {
-            sheet.dismiss(); showExportDialog()
-        })
+        sheet.group("维护",
+            Ui.row(this, p, "↻", "检查更新", updateSub, inCard = true, dot = updateUnseen,
+                trailingView = if (updateAvailable) Ui.pill(this, p, "NEW", p.danger, showDot = false) else null) {
+                sheet.dismiss(); showUpdateDialog()
+            },
+            Ui.row(this, p, "⟳", "刷新页面", "页面卡住、一直转圈或断连时用", inCard = true) {
+                sheet.dismiss(); refreshWebPage()
+            })
 
-        sheet.sectionLabel("权限")
-        val granted = isStoragePermissionGranted()
-        sheet.add(Ui.row(this, p, "▣", "手机存储",
-            if (granted) "已允许 Kimi 读写下载、相册等公共目录" else "允许后 Kimi 才能读写手机里的文件",
-            trailing = if (granted) "已开启" else "去开启",
-            trailingColor = if (granted) p.sub else p.text) {
-            sheet.dismiss(); showStoragePermissionWarning()
-        })
+        sheet.add(Ui.footnote(this, p, "提示：长按悬浮钮可快速切换亮 / 暗"), topMarginDp = 16)
         sheet.show()
     }
 
@@ -710,7 +740,7 @@ class MainActivity : Activity() {
                     overlay.visibility = View.VISIBLE
                 } else {
                     loadedUrl = url
-                    web.loadUrl(url)
+                    web.loadUrl(sessionUrl(url))
                     overlay.visibility = View.GONE
                 }
             }
@@ -781,24 +811,13 @@ class MainActivity : Activity() {
     }
 
     @Deprecated("Deprecated in Java")
+    @android.annotation.SuppressLint("WrongConstant") // Persisted flags are masked to READ/WRITE below.
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == FILE_CHOOSER_REQ) {
-            val cb = fileChooserCallback
-            fileChooserCallback = null
-            if (cb == null) return
-            if (resultCode == RESULT_OK && data != null) {
-                val uris = mutableListOf<Uri>()
-                val cd = data.clipData
-                if (cd != null) {
-                    for (i in 0 until cd.itemCount) uris.add(cd.getItemAt(i).uri)
-                } else {
-                    data.data?.let { uris.add(it) }
-                }
-                cb.onReceiveValue(uris.toTypedArray())
-            } else {
-                cb.onReceiveValue(null)
-            }
-        } else if (requestCode == EXPORT_PICKER_REQ) {
+        if (fileChooser?.onActivityResult(requestCode, resultCode, data) == true) {
+            fileChooser = null
+            return
+        }
+        if (requestCode == EXPORT_PICKER_REQ) {
             val file = pendingExportFile
             pendingExportFile = null
             if (resultCode == RESULT_OK && data?.data != null && file != null) {
@@ -834,7 +853,41 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        fileChooser?.saveState(outState)
+        outState.putString("pending_session", pendingSession)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        receiveSessionIntent(intent)
+        val base = KimiState.url
+        if (pendingSession != null && base != null) {
+            loadedUrl = base
+            web.loadUrl(sessionUrl(base))
+            overlay.visibility = View.GONE
+        }
+    }
+
+    private fun receiveSessionIntent(intent: Intent?) {
+        if (intent?.action != TaskCompletionMonitor.ACTION_OPEN_SESSION) return
+        val id = intent.getStringExtra(TaskCompletionMonitor.EXTRA_SESSION).orEmpty()
+        if (CompletionTracker.validSessionId(id)) pendingSession = id
+        intent.removeExtra(TaskCompletionMonitor.EXTRA_SESSION)
+    }
+
+    private fun sessionUrl(base: String): String {
+        val id = pendingSession ?: return base
+        pendingSession = null
+        // Construct from the verified local engine origin; never open an URL from an Intent.
+        return Uri.parse(base).buildUpon().path("/sessions/$id").build().toString()
+    }
+
     override fun onDestroy() {
+        fileChooser?.release()
+        fileChooser = null
         handler.removeCallbacks(poller)
         if (isFinishing && ::web.isInitialized) web.destroy()
         super.onDestroy()

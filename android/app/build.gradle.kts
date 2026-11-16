@@ -15,8 +15,8 @@ android {
         // targetSdk 压到 28：规避高版本 Android 对应用私有目录 exec 的限制
         // （与 Termux 同款策略；本应用只走侧载，不受 Play 的 targetSdk 要求约束）
         targetSdk = 28
-        versionCode = 8
-        versionName = "0.3.0"
+        versionCode = 9
+        versionName = "0.4.5-dev"
     }
 
     aaptOptions {
@@ -64,5 +64,14 @@ android {
 
 dependencies {
     implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
 }
+
+// Small app-owned fixes are shipped separately; installing them must not erase apt packages.
+val runtimePatches by tasks.registering(Sync::class) {
+    from(rootProject.file("../runtime/hooks"))
+    into(layout.buildDirectory.dir("generated/runtimePatches/runtime-patches"))
+}
+android.sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/runtimePatches"))
+tasks.named("preBuild").configure { dependsOn(runtimePatches) }

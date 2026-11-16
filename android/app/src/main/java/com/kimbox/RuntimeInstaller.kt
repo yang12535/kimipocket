@@ -90,7 +90,10 @@ object RuntimeInstaller {
                 val f = File(ctx.filesDir, path)
                 !f.isFile || !f.canRead() || (needExec && !f.canExecute())
             }
-            if (missing == null) return
+            if (missing == null) {
+                RuntimePatches.install(ctx)
+                return
+            }
             android.util.Log.w("kimbox", "runtime pre-flight failed: ${missing.first} missing/unreadable${if (missing.second) "/not executable" else ""}, re-extracting")
         }
 
@@ -113,6 +116,7 @@ object RuntimeInstaller {
         KimiState.status = if (installed == null) "首次运行：正在部署运行环境…" else "运行环境升级：正在部署新环境…"
         try {
             extractTarGz(ctx, "runtime.pkg", ctx.filesDir)
+            RuntimePatches.install(ctx)
             marker.parentFile?.mkdirs()
             marker.writeText("$RUNTIME_VERSION\n")
         } catch (t: Throwable) {

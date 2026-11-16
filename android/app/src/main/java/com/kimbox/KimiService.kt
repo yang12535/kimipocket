@@ -48,6 +48,7 @@ class KimiService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     /** 日志泵线程：进程退出后需 join 确保所有输出落盘再做自愈判定 */
     private var logPumpThread: Thread? = null
+    private var completionMonitor: TaskCompletionMonitor? = null
     @Volatile private var stopped = false
     @Volatile private var engineThreadRunning = false
     @Volatile private var restartRequested = false
@@ -62,7 +63,8 @@ class KimiService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForegroundWithText("正在启动…")
+        // Reopening the Activity starts this service again; preserve the actual engine state.
+        startForegroundWithText(if (KimiState.running) "Kimi 运行中，点我打开" else KimiState.status)
         acquireWakeLock()
         if (intent?.action == ACTION_RESTART) {
             // 通知栏「重启引擎」按钮：立即终止旧进程，等旧线程自然退出后启新的
@@ -93,6 +95,8 @@ class KimiService : Service() {
     }
 
     override fun onDestroy() {
+        completionMonitor?.close()
+        completionMonitor = null
         stopped = true
         val p = process
         process = null
@@ -218,6 +222,8 @@ class KimiService : Service() {
                 KimiState.running = true
                 KimiState.lastError = null
                 updateNotification("Kimi 运行中，点我打开")
+                completionMonitor?.close()
+                completionMonitor = TaskCompletionMonitor(applicationContext, port).also { it.start() }
             } else {
                 KimiState.lastError = "引擎未能正常就绪（无 server token）"
                 try { p.destroy() } catch (_: Throwable) {}
@@ -226,6 +232,8 @@ class KimiService : Service() {
             // 等日志泵线程把所有剩余输出刷完再做判定，否则关键错误可能被截掉
             try { logPumpThread?.join(2000) } catch (_: Throwable) {}
             process = null
+            completionMonitor?.close()
+            completionMonitor = null
             KimiState.url = null
             KimiState.port = null
             KimiState.running = false
@@ -494,6 +502,7 @@ class KimiService : Service() {
                 restartPi
             )
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build()
     }
 
