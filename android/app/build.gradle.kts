@@ -16,7 +16,7 @@ android {
         // （与 Termux 同款策略；本应用只走侧载，不受 Play 的 targetSdk 要求约束）
         targetSdk = 28
         versionCode = 9
-        versionName = "0.4.5-dev"
+        versionName = "0.4.0-dev"
     }
 
     aaptOptions {
