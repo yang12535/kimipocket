@@ -72,6 +72,9 @@ class CameraFileChooser(
     private var sheet: Ui.Sheet? = null
     private var done = false
 
+    /** 面板取消或启动失败也会结束选择，不一定产生 onActivityResult。 */
+    val isPending: Boolean get() = !done
+
     // 由 FileChooserParams 解析出来的约束
     private var mimes: List<String> = emptyList()
     private var anyType = false

@@ -43,7 +43,7 @@ class RemoteControlActivity : Activity() {
     private var authorizationGeneration = 0
     private val authorizationPoll = Runnable { checkAuthorization() }
     private val idleClose = Runnable {
-        if (!resumed && remoteSessionActive && fileChooser == null && pendingAuthorizationUrl == null && !isFinishing && !isDestroyed) finish()
+        if (!resumed && remoteSessionActive && fileChooser?.isPending != true && pendingAuthorizationUrl == null && !isFinishing && !isDestroyed) finish()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -368,7 +368,7 @@ class RemoteControlActivity : Activity() {
 
     private fun scheduleIdleClose() {
         handler.removeCallbacks(idleClose)
-        if (!resumed && remoteSessionActive && fileChooser == null && pendingAuthorizationUrl == null) handler.postDelayed(idleClose, IDLE_TIMEOUT_MS)
+        if (!resumed && remoteSessionActive && fileChooser?.isPending != true && pendingAuthorizationUrl == null) handler.postDelayed(idleClose, IDLE_TIMEOUT_MS)
     }
 
     private fun maybeRenameOwnDevice() {
